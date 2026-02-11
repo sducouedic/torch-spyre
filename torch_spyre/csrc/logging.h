@@ -19,6 +19,11 @@
 #include <iostream>
 #include <utility>
 
+// Environment variable names
+#define SPYRE_DEBUG_ENV "SPYRE_DEBUG_ENV"
+#define SPYRE_DOWNCAST_ENV "SPYRE_DOWNCAST_ENV"
+#define EAGER_MODE_ENV "EAGER_MODE_ENV"
+
 namespace spyre {
 
 extern bool g_debug_info_enabled;

@@ -15,11 +15,16 @@
  */
 
 #include "spyre_storage_impl.h"
+#include "logging.h"
 
 namespace spyre {
 
 SpyreStorageImpl::SpyreStorageImpl(use_byte_size_t, c10::SymInt size_bytes,
                                    at::Allocator* allocator, bool resizable)
-    : c10::StorageImpl(use_byte_size_t(), size_bytes, allocator, resizable) {}
+    : c10::StorageImpl(use_byte_size_t(), size_bytes, allocator, resizable) {
+  DEBUGINFO("=== SpyreStorageImpl constructor called ===");
+  DEBUGINFO("size_bytes=", size_bytes, ", resizable=", resizable);
+  DEBUGINFO("=== SpyreStorageImpl constructor completed ===");
+}
 
 }  // namespace spyre

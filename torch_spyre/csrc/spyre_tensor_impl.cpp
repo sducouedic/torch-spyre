@@ -96,17 +96,23 @@ int32_t SpyreTensorLayout::host_stick_dim() {
 
 void SpyreTensorLayout::init(std::vector<int64_t> host_size,
                              c10::ScalarType dtype) {
+  DEBUGINFO("=== SpyreTensorLayout::init (simple) called ===");
+  DEBUGINFO("host_size=", host_size, ", dtype=", dtype);
   int host_dims = static_cast<int32_t>(host_size.size());
   std::vector<int32_t> dim_order;
   for (int32_t i = 0; i < host_dims; i++) {
     dim_order.push_back(i);
   }
+  DEBUGINFO("Generated dim_order=", dim_order);
   init(host_size, dtype, dim_order);
+  DEBUGINFO("=== SpyreTensorLayout::init (simple) completed ===");
 }
 
 void SpyreTensorLayout::init(std::vector<int64_t> host_size,
                              c10::ScalarType dtype,
                              std::vector<int32_t> dim_order) {
+  DEBUGINFO("=== SpyreTensorLayout::init (with dim_order) called ===");
+  DEBUGINFO("host_size=", host_size, ", dtype=", dtype, ", dim_order=", dim_order);
   TORCH_CHECK((host_size.size() == dim_order.size()) ||
                   (((host_size.size() + 1) == dim_order.size()) &&
                    dim_order.back() == -1),
@@ -116,13 +122,17 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
   const auto [sen_dtype_cpu, sen_dtype_dev] =
       stringToDTDataFormatPair(str_type);
   this->device_dtype = sen_dtype_dev;
+  DEBUGINFO("device_dtype set to ", EnumsConversion::dataFormatsToString(sen_dtype_dev));
 
   if (host_size.size() == 0) {
+    DEBUGINFO("host_size is empty (scalar tensor)");
     // Degenerate case of 0-dimension tensor (ie, a scalar)
     this->device_size.resize(1);
     this->dim_map.resize(1);
     this->device_size[0] = this->elems_per_stick();
     this->dim_map[0] = -1;  // host_size has no entries!
+    DEBUGINFO("Scalar tensor: device_size=[", this->device_size[0], "], dim_map=[-1]");
+    DEBUGINFO("=== SpyreTensorLayout::init completed (scalar) ===");
     return;
   }
 
@@ -131,24 +141,30 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
   // To enable this to be true for Spyre tensors
   // we filter dim_order to remove trivial dimensions before tiling.
   bool sparse = dim_order.back() == -1;
+  DEBUGINFO("sparse=", sparse);
   std::vector<int32_t> filtered_dim_order;
   for (auto i = 0; i < dim_order.size(); i++) {
     if ((dim_order[i] == -1) || (host_size[dim_order[i]] != 1)) {
       filtered_dim_order.push_back(dim_order[i]);
     }
   }
+  DEBUGINFO("filtered_dim_order=", filtered_dim_order);
 
   // Special case: a tensor all of whose dimensions are size 1 keeps dim 0
   if ((filtered_dim_order.size() == 0) ||
       ((filtered_dim_order.size() == 1) && (filtered_dim_order.back() == -1))) {
+    DEBUGINFO("All dimensions are size 1, inserting dim 0");
     filtered_dim_order.insert(filtered_dim_order.begin(), 0);
   }
 
   // Computing tiling
+  DEBUGINFO("Computing generic stick layout");
   this->dim_map = spyre::get_generic_stick_layout(filtered_dim_order);
+  DEBUGINFO("dim_map=", this->dim_map);
   this->device_size.resize(this->dim_map.size());
   auto elems_in_stick = sparse ? 1 : this->elems_per_stick();
   auto stick_dim = this->host_stick_dim();
+  DEBUGINFO("elems_in_stick=", elems_in_stick, ", stick_dim=", stick_dim);
   this->device_size[this->dim_map.size() - 1] = this->elems_per_stick();
   for (int i = 0; i < this->dim_map.size() - 1; i++) {
     auto dim = this->dim_map[i];
@@ -159,6 +175,8 @@ void SpyreTensorLayout::init(std::vector<int64_t> host_size,
       this->device_size[i] = host_size[dim];
     }
   }
+  DEBUGINFO("device_size=", this->device_size);
+  DEBUGINFO("=== SpyreTensorLayout::init completed ===");
 }
 
 std::string SpyreTensorLayout::toString() const {
@@ -188,7 +206,9 @@ SpyreTensorImpl::SpyreTensorImpl(c10::Storage&& storage,
                                  c10::DispatchKeySet key_set,
                                  const caffe2::TypeMeta& dtype)
     : TensorImpl(std::move(storage), key_set, dtype) {
+  DEBUGINFO("=== SpyreTensorImpl constructor (simple) called ===");
   set_custom_sizes_strides(c10::TensorImpl::SizesStridesPolicy::Default);
+  DEBUGINFO("=== SpyreTensorImpl constructor (simple) completed ===");
 }
 
 SpyreTensorImpl::SpyreTensorImpl(c10::Storage storage,
@@ -196,8 +216,11 @@ SpyreTensorImpl::SpyreTensorImpl(c10::Storage storage,
                                  const caffe2::TypeMeta& dtype,
                                  SpyreTensorLayout stl)
     : TensorImpl(std::move(storage), key_set, dtype) {
+  DEBUGINFO("=== SpyreTensorImpl constructor (with layout) called ===");
+  DEBUGINFO("layout=", stl.toString());
   set_custom_sizes_strides(c10::TensorImpl::SizesStridesPolicy::Default);
   this->spyre_layout = stl;
+  DEBUGINFO("=== SpyreTensorImpl constructor (with layout) completed ===");
 }
 
 // FIXME: This is currently returning cpu storage as other methods use it, but

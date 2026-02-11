@@ -67,37 +67,50 @@ static void init_from_env() {
 }
 
 void _startRuntime() {
-  DEBUGINFO("starting runtime");
+  DEBUGINFO("=== _startRuntime called ===");
+  DEBUGINFO("Creating RuntimeInterface");
   // TODO(tmhoangt): move sendnn::RuntimeInterface to flex to isolate from
   // sendnn
   std::shared_ptr<sendnn::RuntimeInterface> base_runtime;
   auto s = flex::CreateRuntimeInterface(&base_runtime);
+  DEBUGINFO("CreateRuntimeInterface status: ", s);
   std::shared_ptr<flex::Runtime> runtime =
       std::dynamic_pointer_cast<flex::Runtime>(base_runtime);
+  DEBUGINFO("Initializing from environment");
   init_from_env();
   if (runtime) {
+    DEBUGINFO("Runtime created successfully, setting global runtime");
     GlobalRuntime::set(runtime);
-    DEBUGINFO(s);
-    DEBUGINFO("runtime started");
+    DEBUGINFO("Runtime status: ", s);
+    DEBUGINFO("=== Runtime started successfully ===");
   } else {
-    DEBUGINFO("runtime FAILED TO START.");
+    DEBUGINFO("=== Runtime FAILED TO START ===");
   }
 }
 void startRuntime() {
+  DEBUGINFO("=== startRuntime called ===");
   static std::once_flag flag;
   std::call_once(flag, _startRuntime);
+  DEBUGINFO("=== startRuntime completed ===");
 }
 
 void freeRuntime() {
+  DEBUGINFO("=== freeRuntime called ===");
   GlobalRuntime::reset();
+  DEBUGINFO("=== freeRuntime completed ===");
 }
 void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
+  DEBUGINFO("=== launchKernel called ===");
+  DEBUGINFO("g2_path=", g2_path, ", num_args=", args.size());
   // Get global runtime from eager
   auto gl = sendnn::GraphLoader(GlobalRuntime::get());
+  DEBUGINFO("GraphLoader created");
 
   // Load compiled kernel
   auto g2 = sendnn::Graph();
+  DEBUGINFO("Deserializing graph from ", g2_path);
   sendnn::Deserialize(&g2, g2_path);
+  DEBUGINFO("Graph deserialized");
 
   for (auto &super_node : g2.compute_ops_) {
     if (super_node->Name() != "DeviceInit" &&
@@ -143,22 +156,28 @@ void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
   }
 
   // Load/parse patched G2 graph
+  DEBUGINFO("Loading graph");
   auto status = gl.LoadGraph(g2, false);
   if (!status.IsOk()) throw std::runtime_error(status.Message());
 
+  DEBUGINFO("Compiling graph");
   status = gl.CompileGraph();
   if (!status.IsOk()) throw std::runtime_error(status.Message());
 
+  DEBUGINFO("Parsing graph");
   status = gl.ParseGraph();
   if (!status.IsOk()) throw std::runtime_error(status.Message());
 
   // Create sendnn tensors
+  DEBUGINFO("Creating sendnn tensors");
   std::vector<sendnn::ConstTensor> sen_inputs;
   std::vector<sendnn::Tensor> sen_outputs;
   for (size_t i = 0; i < args.size() - 1; ++i) {
     auto arg = args[i];
+    DEBUGINFO("Processing input tensor ", i, ": shape=", arg.sizes(), ", dtype=", arg.scalar_type());
     at::Tensor tmp_0;
     if (arg.dim() == 0) {
+      DEBUGINFO("Input ", i, " is scalar, reshaping to {1}");
       tmp_0 = (at::ones({1}, arg.dtype()) * arg).to(arg.device());
       auto tensor = createInputTensor(gl, tmp_0.storage().data_ptr().get(), i,
                                       (args.size() >= 3) ? 2 : 1);
@@ -175,6 +194,7 @@ void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
       sen_inputs.push_back(tensor);
     }
   }
+  DEBUGINFO("Creating output tensor: shape=", args.back().sizes(), ", dtype=", args.back().scalar_type());
   auto tensor = createOutputTensor(gl, args.back().storage().data_ptr().get(),
                                    0, (args.size() >= 3) ? 2 : 1);
   tensor.SetSpyreData(static_cast<SharedOwnerCtx *>(
@@ -183,7 +203,9 @@ void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
   sen_outputs.push_back(tensor);
 
   // Execute device init
+  DEBUGINFO("Executing kernel with ", sen_inputs.size(), " inputs and ", sen_outputs.size(), " outputs");
   if (args.size() == 6) {
+    DEBUGINFO("Execution path: args.size() == 6");
     // Filling in segment 5 adds another input to the device init supernode
     status =
         gl.Predict(sendnn::Outputs(), {sen_inputs[1], sen_outputs.front()}, 1);
@@ -191,12 +213,14 @@ void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
     status = gl.Compute(sen_outputs, sen_inputs, 2);
     if (!status.IsOk()) throw std::runtime_error(status.Message());
   } else if (args.size() >= 3) {
+    DEBUGINFO("Execution path: args.size() >= 3");
     status = gl.Predict(sendnn::Outputs(), {sen_inputs[1]}, 1);
     if (!status.IsOk()) throw std::runtime_error(status.Message());
 
     status = gl.Compute(sen_outputs, sen_inputs, 2);
     if (!status.IsOk()) throw std::runtime_error(status.Message());
   } else {
+    DEBUGINFO("Execution path: args.size() < 3");
     status = gl.Predict(sendnn::Outputs(), sendnn::Inputs(), 0);
     if (!status.IsOk()) throw std::runtime_error(status.Message());
 
@@ -204,6 +228,7 @@ void launchKernel(std::string g2_path, std::vector<at::Tensor> args) {
     if (!status.IsOk()) throw std::runtime_error(status.Message());
   }
 
+  DEBUGINFO("=== launchKernel completed ===");
   return;
 }
 

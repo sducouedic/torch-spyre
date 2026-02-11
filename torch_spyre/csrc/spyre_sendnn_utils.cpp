@@ -34,6 +34,8 @@ using spyre_ptr_t = uint64_t;
 // TODO(tmhoangt): DTYPE
 std::optional<sendnn::GraphLoader> getCachedGraphLoader(
     std::string name, c10::IntArrayRef size, c10::IntArrayRef stride) {
+  DEBUGINFO("=== getCachedGraphLoader called ===");
+  DEBUGINFO("name=", name, ", size=", size, ", stride=", stride);
   std::vector<int64_t> size_copy;
   for (int64_t s : size) {
     size_copy.push_back(s);
@@ -44,15 +46,20 @@ std::optional<sendnn::GraphLoader> getCachedGraphLoader(
   }
   auto key = std::make_tuple(name, size_copy, stride_copy);
   try {
-    return GlobalGraphLoaderCache::get().at(key);
+    auto result = GlobalGraphLoaderCache::get().at(key);
+    DEBUGINFO("Cache hit for ", name);
+    return result;
   }
   catch (const std::out_of_range& e) {
+    DEBUGINFO("Cache miss for ", name);
     return std::nullopt;
   }
 }
 
 void storeCachedGraphLoader(std::string name, c10::IntArrayRef size,
                             c10::IntArrayRef stride, sendnn::GraphLoader gl) {
+  DEBUGINFO("=== storeCachedGraphLoader called ===");
+  DEBUGINFO("Storing cache entry for name=", name, ", size=", size, ", stride=", stride);
   std::vector<int64_t> size_copy;
   for (int64_t s : size) {
     size_copy.push_back(s);
@@ -63,12 +70,15 @@ void storeCachedGraphLoader(std::string name, c10::IntArrayRef size,
   }
   auto key = std::make_tuple(name, size_copy, stride_copy);
   GlobalGraphLoaderCache::get()[key] = gl;
+  DEBUGINFO("Cache entry stored successfully");
 }
 
 /**
  * Create a dummy op for a single tensor in/out for use in allocation
  */
 sendnn::GraphBuilder createDummyOp(c10::IntArrayRef sizes) {
+  DEBUGINFO("=== createDummyOp called ===");
+  DEBUGINFO("sizes=", sizes);
   sendnn::GraphBuilder gb;
 
   std::vector<int64_t> shape;
@@ -84,28 +94,36 @@ sendnn::GraphBuilder createDummyOp(c10::IntArrayRef sizes) {
   auto r = gb.Relu("Relu", ti, pi);
 
   gb.PrimaryOutput("Output", r);
+  DEBUGINFO("=== createDummyOp completed ===");
   return gb;
 }
 
 sendnn::GraphLoader prepareGraphLoader(sendnn::GraphBuilder* gb) {
+  DEBUGINFO("=== prepareGraphLoader called ===");
   sendnn::Graph graph;
+  DEBUGINFO("Finalizing graph");
   auto f_s = gb->Finalize(&graph);
 
   sendnn::GraphLoader gl(GlobalRuntime::get());
 
+  DEBUGINFO("Loading graph");
   auto l_s = gl.LoadGraph(graph);
 
   // hardcode to eager-mode for proper allocation when compiling eager graphs
   const char* prev_eager_env_str = std::getenv(EAGER_MODE_ENV);
+  DEBUGINFO("Setting EAGER_MODE_ENV=1 (previous value: ", (prev_eager_env_str ? prev_eager_env_str : "null"), ")");
 
   setenv(EAGER_MODE_ENV, "1", 1);
 
+  DEBUGINFO("Compiling graph");
   auto c_s = gl.CompileGraph();
 
   // reset eager_mode
   setenv(EAGER_MODE_ENV,
          prev_eager_env_str != nullptr ? prev_eager_env_str : "0", 1);
+  DEBUGINFO("Reset EAGER_MODE_ENV");
 
+  DEBUGINFO("=== prepareGraphLoader completed ===");
   return gl;
 }
 
@@ -231,20 +249,29 @@ sendnn::GraphLoader& parseGraphLoader(
 sendnn::ConstTensor createInputTensor(sendnn::GraphLoader& gl, void* data_ptr,
                                       unsigned int input_index /*= 0*/,
                                       uint64_t sn_index /*= 1*/) {
+  DEBUGINFO("=== createInputTensor called ===");
+  DEBUGINFO("input_index=", input_index, ", sn_index=", sn_index, ", data_ptr=", data_ptr);
   auto inp_ti = gl.GetInputs(sn_index)[input_index];
+  DEBUGINFO("=== createInputTensor completed ===");
   return sendnn::ConstTensor(inp_ti, data_ptr);
 }
 
 sendnn::Tensor createOutputTensor(sendnn::GraphLoader& gl, void* data_ptr,
                                   unsigned int output_index /*= 0*/,
                                   uint64_t sn_index /*= 1*/) {
+  DEBUGINFO("=== createOutputTensor called ===");
+  DEBUGINFO("output_index=", output_index, ", sn_index=", sn_index, ", data_ptr=", data_ptr);
   auto inp_ti = gl.GetOutputs(sn_index)[output_index];
+  DEBUGINFO("=== createOutputTensor completed ===");
   return sendnn::Tensor(inp_ti, data_ptr);
 }
 
 sendnn::TensorInfo getTensorInfo(const at::Tensor& input) {
+  DEBUGINFO("=== getTensorInfo called ===");
+  DEBUGINFO("input: shape=", input.sizes(), ", dtype=", input.scalar_type());
   std::vector<int64_t> shape;
   if (input.dim() == 0) {
+    DEBUGINFO("Scalar tensor, using shape {1}");
     shape = {1};
   } else {
     for (const int64_t& element : input.sizes()) {
@@ -255,16 +282,20 @@ sendnn::TensorInfo getTensorInfo(const at::Tensor& input) {
   const auto [sen_dtype_cpu, sen_dtype_dev] = stringToSenDatatypePair(str_type);
   sendnn::TensorShape t_shape(shape);
   sendnn::TensorInfo ti{sen_dtype_cpu, t_shape, sendnn::TensorLayout::NHWC};
+  DEBUGINFO("=== getTensorInfo completed ===");
   return ti;
 }
 
 sendnn::TensorInfo getScalarTensorInfo(const at::Tensor& input) {
+  DEBUGINFO("=== getScalarTensorInfo called ===");
+  DEBUGINFO("input dtype=", input.scalar_type());
   // get the scalar shape, but type is matched with the given tensor
   std::vector<int64_t> shape = {1};
   sendnn::TensorShape t_shape(shape);
   auto str_type = torchScalarToString[input.scalar_type()];
   const auto [sen_dtype_cpu, sen_dtype_dev] = stringToSenDatatypePair(str_type);
   sendnn::TensorInfo ti{sen_dtype_cpu, t_shape, sendnn::TensorLayout::NHWC};
+  DEBUGINFO("=== getScalarTensorInfo completed ===");
   return ti;
 }
 
