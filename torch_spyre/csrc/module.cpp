@@ -41,6 +41,7 @@
 #include "logging.h"
 #include "spyre_mem.h"
 #include "spyre_sendnn_utils.h"
+#include "spyre_views.h"
 #include "types_mapping.h"
 
 namespace spyre {
@@ -243,30 +244,19 @@ uint32_t encodeConstant(float torch_const, DataFormats df) {
   }
   return sen_const;
 }
-void convertArtifacts(std::string artifacts_path) {
-  dee::PBD pbd;
-  sendnn::Graph g2;
-
-  setenv("DEEPRT_EXPORT_DIR", artifacts_path.c_str(), 1);
-  senbfcc::GlobalTracedSettings::Get().UpdateValue("DEEPRT_EXPORT_DIR",
-                                                   artifacts_path);
-
-  setenv("SENDNN_SERIALIZER_FORMAT", "CBOR", 1);
-
-  // Convert compiled artifacts to sendnn g2 graph
-  pbd.FromGraph(&g2);
-
-  // Serialize g2 graph
-  sendnn::Serialize(g2, artifacts_path + "/g2");
-
-  return;
-}
 
 int64_t get_elem_in_stick(c10::ScalarType torch_dtype) {
   auto str_type = torchScalarToString[torch_dtype];
   const auto [sen_dtype_cpu, sen_dtype_dev] =
       stringToDTDataFormatPair(str_type);
   return elems_per_stick(sen_dtype_dev);
+}
+
+DataFormats get_device_dtype(c10::ScalarType torch_dtype) {
+  auto str_type = torchScalarToString[torch_dtype];
+  const auto [sen_dtype_cpu, sen_dtype_dev] =
+      stringToDTDataFormatPair(str_type);
+  return sen_dtype_dev;
 }
 
 }  // namespace spyre
@@ -277,10 +267,33 @@ PYBIND11_MODULE(_C, m) {
   m.def("free_runtime", &spyre::freeRuntime);
   m.def("launch_kernel", &spyre::launchKernel);
   m.def("encode_constant", &spyre::encodeConstant);
-  m.def("convert_artifacts", &spyre::convertArtifacts);
+  m.def("convert_artifacts", &dee::convertArtifacts);
+
+  py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");
+
+  dci_cls.def_readonly("device_size", &spyre::SpyreTensorLayout::device_size)
+      .def_readonly("dim_map", &spyre::SpyreTensorLayout::dim_map)
+      .def_readonly("device_dtype", &spyre::SpyreTensorLayout::device_dtype)
+      .def("__str__",
+           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
+      .def("__repr__",
+           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
+      .def("elems_per_stick", &spyre::SpyreTensorLayout::elems_per_stick)
+      .def("host_stick_dim", &spyre::SpyreTensorLayout::host_stick_dim)
+      .def("similar_dim_order", &spyre::SpyreTensorLayout::similar_dim_order)
+      .def(py::self == py::self)
+      .def(py::init<std::vector<int64_t>, c10::ScalarType>(),
+           py::arg("host_size"), py::arg("dtype"))
+      .def(py::init<std::vector<int64_t>, c10::ScalarType,
+                    std::vector<int32_t>>(),
+           py::arg("host_size"), py::arg("dtype"), py::arg("dim_order"))
+      .def(py::init<std::vector<int64_t>, std::vector<int32_t>, DataFormats>(),
+           py::arg("device_size"), py::arg("dim_map"), py::arg("device_dtype"));
+
   m.def("spyre_empty_with_layout", &spyre::spyre_empty_with_layout);
   m.def("to_with_layout", &spyre::to_with_layout);
-  m.def("empty_with_layout", &spyre::empty_with_layout);
+  m.def("empty_with_layout", &spyre::py_empty_with_layout);
+  m.def("as_strided_with_layout", &spyre::as_strided_with_layout);
 
   py::enum_<DataFormats>(m, "DataFormats")
       .value("SEN169_FP16", DataFormats::SEN169_FP16)
@@ -305,30 +318,13 @@ PYBIND11_MODULE(_C, m) {
       .def("elems_per_stick",
            [](const DataFormats &df) { return spyre::elems_per_stick(df); });
 
-  py::class_<spyre::SpyreTensorLayout> dci_cls(m, "SpyreTensorLayout");
-
-  dci_cls.def_readonly("device_size", &spyre::SpyreTensorLayout::device_size)
-      .def_readonly("dim_map", &spyre::SpyreTensorLayout::dim_map)
-      .def_readonly("device_dtype", &spyre::SpyreTensorLayout::device_dtype)
-      .def("__str__",
-           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
-      .def("__repr__",
-           [](const spyre::SpyreTensorLayout &c) { return c.toString(); })
-      .def("elems_per_stick", &spyre::SpyreTensorLayout::elems_per_stick)
-      .def("host_stick_dim", &spyre::SpyreTensorLayout::host_stick_dim)
-      .def(py::self == py::self)
-      .def(py::init<std::vector<int64_t>, c10::ScalarType>(),
-           py::arg("host_size"), py::arg("dtype"))
-      .def(py::init<std::vector<int64_t>, c10::ScalarType,
-                    std::vector<int32_t>>(),
-           py::arg("host_size"), py::arg("dtype"), py::arg("dim_order"))
-      .def(py::init<std::vector<int64_t>, std::vector<int32_t>, DataFormats>(),
-           py::arg("device_size"), py::arg("dim_map"), py::arg("device_dtype"));
-
   m.def("get_spyre_tensor_layout", &spyre::get_spyre_tensor_layout);
+  m.def("set_spyre_tensor_layout", &spyre::set_spyre_tensor_layout);
+  m.def("compute_view_layout", &spyre::compute_view_layout);
   m.def("get_downcast_warning", &spyre::get_downcast_warn_enabled,
         "Return whether downcast warnings are enabled.");
   m.def("set_downcast_warning", &spyre::set_downcast_warn_enabled,
         "Enable/disable downcast warnings for this process.");
   m.def("get_elem_in_stick", &spyre::get_elem_in_stick);
+  m.def("get_device_dtype", &spyre::get_device_dtype);
 }
