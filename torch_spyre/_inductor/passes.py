@@ -36,6 +36,10 @@ from .temp_passes import (
     convert_constant_with_graph_node,
 )
 from . import config
+from .propagate_hints import (
+    collect_spyre_hints,
+    recover_spyre_hints,
+)
 from .propagate_layouts import (
     propagate_mutation_layouts,
     propagate_spyre_tensor_layouts,
@@ -116,7 +120,7 @@ class CustomPrePasses(CustomGraphPass):
     """
     The list of custom passes to run
     """
-    passes: List[Callable[[torch.fx.graph.Graph], None]] = []
+    passes: List[Callable[[torch.fx.graph.Graph], None]] = [collect_spyre_hints]
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         for p in CustomPrePasses.passes:
@@ -138,6 +142,7 @@ class CustomPostPasses(CustomGraphPass):
     The list of custom passes to run
     """
     passes: List[Callable[[torch.fx.graph.Graph], None]] = [
+        recover_spyre_hints,
         convert_constant_with_graph_node,
         mm_to_bmm_pass.apply,
         bmm_unflatten_pass.apply,
