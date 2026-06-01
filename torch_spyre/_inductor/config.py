@@ -112,4 +112,14 @@ layout_solver: Literal[
     "greedy", "bestfit", "firstfit", "cpsat", "simulated_annealing"
 ] = os.environ.get("LAYOUT_SOLVER", "greedy")  # type: ignore[assignment]
 
+# Enable/disable persistent caching of compiled SDSC kernels.
+# When enabled, compiled artifacts are stored in content-addressed directories
+# under {cache_dir}/inductor-spyre-cache/ and reused across torch.compile
+# invocations.
+# Set SPYRE_KERNEL_CACHE=0 to disable.
+# To force recompilation (bypass lookup but still save), use the standard
+# PyTorch flag: TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 / set
+# torch._inductor.config.force_disable_caches = True.
+spyre_kernel_cache: bool = os.environ.get("SPYRE_KERNEL_CACHE", "1") == "1"
+
 install_config_module(sys.modules[__name__])
