@@ -119,6 +119,32 @@ def get_cache_root_dir() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _symbol_kind_key(kind) -> list:
+    """Return the cache-relevant fields of a ``SymbolKind``.
+
+    Only the parts of a symbol that are **baked into the compiled bundle** may
+    enter the cache key.  Splitting ``SymbolKind`` this way is what makes the
+    key both correct and reusable:
+
+    The corresponding *value* in ``base_symbol_values`` (the raw HBM byte
+    address) is deliberately **not** included: it is supplied at launch as an
+    ``!sdscbundle.input_arg`` parameter, so two runs that place the same tensor
+    at different addresses must still share a cache entry.  Hashing it would
+    make every key allocation-specific and reduce the hit rate to ~zero.
+    """
+    return [
+        kind.kind,
+        kind.base_sym_idx,
+        kind.offset,
+        kind.arg_index,
+        kind.granularity,
+        kind.max_value,
+        kind.pytorch_sym,
+        kind.core_idx,
+        kind.split_count,
+    ]
+
+
 def compute_specs_hash(specs: Sequence) -> str:
     """Compute a cache key directly from OpSpec objects — no disk I/O required.
 
@@ -132,13 +158,17 @@ def compute_specs_hash(specs: Sequence) -> str:
     * The JSON serialisation of every ``sdsc_N.json`` dict produced by
       ``compile_op_spec`` — this captures the full op structure, iteration
       space, tiling, tensor shapes, and dtypes.
+    * The ``SymbolKind`` *structure* of every registered symbol. This covers 
+      the compile-time address arithmetic that is baked into ``bundle.mlir`` 
+      but is absent from the ``sdsc_N.json`` dicts.
     * ``torch.__version__`` — invalidates on PyTorch upgrades.
     * ``torch_spyre.__version__`` — invalidates on torch-spyre upgrades.
     * ``dxp_standalone --version`` — invalidates when the backend compiler
       that consumes the bundle changes.
 
-    ``bundle.mlir`` is **not** hashed here because it is fully determined by
-    the ``sdsc_N.json`` dicts; hashing both would be redundant.
+    ``bundle.mlir`` is not hashed directly, but everything in it that is not
+    already implied by the ``sdsc_N.json`` dicts *is* covered via the
+    ``SymbolKind`` structure.
     """
     from torch_spyre._inductor.codegen.superdsc import compile_op_spec
     from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
@@ -159,7 +189,7 @@ def compute_specs_hash(specs: Sequence) -> str:
             if isinstance(entry, LoopSpec):
                 _collect(entry.body)
             elif isinstance(entry, OpSpec):
-                sdsc_json, local_sym_values, _, _ = compile_op_spec(
+                sdsc_json, local_sym_values, _, symbol_kinds = compile_op_spec(
                     sdsc_idx,
                     entry,
                     symbols,
@@ -170,6 +200,15 @@ def compute_specs_hash(specs: Sequence) -> str:
                 sdsc_idx += 1
                 content_parts.append(
                     json.dumps(sdsc_json, sort_keys=True).encode()
+                )
+                
+                # The sdsc_json refers to addresses only as opaque negative symbol
+                # ids, so we also hash the symbol structure to keep them distinct
+                content_parts.append(
+                    json.dumps(
+                        [_symbol_kind_key(k) for k in symbol_kinds],
+                        sort_keys=True,
+                    ).encode()
                 )
 
     _collect(specs_list)
