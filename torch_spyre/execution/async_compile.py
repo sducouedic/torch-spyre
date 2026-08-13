@@ -14,6 +14,7 @@
 
 import shutil
 import tempfile
+import time
 from collections.abc import Sequence
 import os
 import subprocess
@@ -108,6 +109,7 @@ class SpyreAsyncCompile(AsyncCompile):
             # the rename in commit_compile_dir is atomic on POSIX.  There is
             # no separate workspace: dxp_standalone writes directly here.
             compile_dir = allocate_compile_dir(cache_key)
+            t_compile = time.perf_counter()
             try:
                 generate_bundle(kernel_name, compile_dir, specs)
 
@@ -126,9 +128,15 @@ class SpyreAsyncCompile(AsyncCompile):
                         )
                         raise
 
+                compile_sec = time.perf_counter() - t_compile
                 cached_dir = commit_compile_dir(compile_dir, cache_key)
                 compile_dir = None  # ownership transferred — do not delete
-                logger.info("Kernel compiled and cached at: %s", cached_dir)
+                logger.info(
+                    "Kernel %s compiled in %.3fs; cached at: %s",
+                    kernel_name,
+                    compile_sec,
+                    cached_dir,
+                )
                 return SpyreSDSCKernelRunner(kernel_name, cached_dir)
             finally:
                 # compile_dir is None when commit_compile_dir succeeded.
@@ -138,7 +146,9 @@ class SpyreAsyncCompile(AsyncCompile):
 
         # Caching disabled (SPYRE_KERNEL_CACHE=0 or force_disable_caches).
         # Compile into a throw-away temp dir that lives for this process only.
+        logger.info("Cache disabled: compiling kernel %s", kernel_name)
         output_dir = get_output_dir(kernel_name)
+        t_compile = time.perf_counter()
         generate_bundle(kernel_name, output_dir, specs)
 
         # Invoke backend compiler of SDSC Bundle
@@ -155,4 +165,10 @@ class SpyreAsyncCompile(AsyncCompile):
                 )
                 raise
 
+        logger.info(
+            "Kernel %s compiled in %.3fs; output at: %s",
+            kernel_name,
+            time.perf_counter() - t_compile,
+            output_dir,
+        )
         return SpyreSDSCKernelRunner(kernel_name, output_dir)
