@@ -158,8 +158,8 @@ def compute_specs_hash(specs: Sequence) -> str:
     * The JSON serialisation of every ``sdsc_N.json`` dict produced by
       ``compile_op_spec`` — this captures the full op structure, iteration
       space, tiling, tensor shapes, and dtypes.
-    * The ``SymbolKind`` *structure* of every registered symbol. This covers 
-      the compile-time address arithmetic that is baked into ``bundle.mlir`` 
+    * The ``SymbolKind`` *structure* of every registered symbol. This covers
+      the compile-time address arithmetic that is baked into ``bundle.mlir``
       but is absent from the ``sdsc_N.json`` dicts.
     * ``torch.__version__`` — invalidates on PyTorch upgrades.
     * ``torch_spyre.__version__`` — invalidates on torch-spyre upgrades.
@@ -172,9 +172,6 @@ def compute_specs_hash(specs: Sequence) -> str:
     """
     from torch_spyre._inductor.codegen.superdsc import compile_op_spec
     from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
-    from torch_spyre._inductor import config as _spyre_config
-
-    use_symbols = _spyre_config.bundle_symbolic_args
 
     specs_list = list(specs)
 
@@ -194,14 +191,11 @@ def compute_specs_hash(specs: Sequence) -> str:
                     entry,
                     symbols,
                     symbol_id_offset,
-                    use_symbols=use_symbols,
                 )
                 symbol_id_offset += len(local_sym_values)
                 sdsc_idx += 1
-                content_parts.append(
-                    json.dumps(sdsc_json, sort_keys=True).encode()
-                )
-                
+                content_parts.append(json.dumps(sdsc_json, sort_keys=True).encode())
+
                 # The sdsc_json refers to addresses only as opaque negative symbol
                 # ids, so we also hash the symbol structure to keep them distinct
                 content_parts.append(
