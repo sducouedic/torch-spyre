@@ -30,6 +30,7 @@ from torch_spyre._C import (
     ElementArrangement,
     extract_kernel_provenance_key as extract_kernel_provenance_key_cpp,
 )
+from torch_spyre._inductor import config as _spyre_config
 from torch_spyre._inductor.op_spec import (
     DebugHandle,
     IndirectAccess,
@@ -544,6 +545,20 @@ class TestKernelProvenanceEventName:
 
 
 class TestKernelProvenancePropagation:
+    @pytest.fixture(autouse=True)
+    def _disable_kernel_cache(self):
+        """Route ``sdsc()`` down the cache-disabled path.
+
+        These tests assert on how provenance reaches the runner, and build
+        minimal synthetic OpSpecs to do it.  The caching path first derives a
+        cache key via ``compute_specs_hash``, which runs the real
+        ``compile_op_spec`` -- that needs fully formed specs and rejects these.
+        Both paths carry provenance identically, so the cheaper one is the one
+        to exercise here.
+        """
+        with _spyre_config.patch("spyre_kernel_cache", False):
+            yield
+
     def test_async_compile_builds_descriptor_from_finalized_specs(self):
         specs = [
             _op(_handle(9)),
@@ -648,9 +663,12 @@ class TestKernelProvenancePropagation:
                 kernel_provenance=descriptor,
             )
 
-        assert runner.kernel_provenance is descriptor
-        assert runner.profiler_event_name == _event_name(descriptor)
-        assert runner.jobplan == "jobplan"
+            # Inside the patch block: ``jobplan`` is lazy, so touching it is
+            # what drives prepare_kernel/register_kernel_provenance.
+            assert runner.kernel_provenance is descriptor
+            assert runner.profiler_event_name == _event_name(descriptor)
+            assert runner.jobplan == "jobplan"
+
         register_kernel_provenance.assert_called_once_with(
             _event_name(descriptor), list(descriptor.debug_handle_ids)
         )
@@ -671,7 +689,10 @@ class TestKernelProvenancePropagation:
         ):
             runner = SpyreSDSCKernelRunner("sdsc_fused_mm_0", "/tmp/kernel")
 
-        assert runner.kernel_provenance is None
-        assert runner.profiler_event_name is None
+            assert runner.kernel_provenance is None
+            assert runner.profiler_event_name is None
+            # Lazy: this is what drives the prepare_kernel call asserted below.
+            assert runner.jobplan == "jobplan"
+
         prepare_kernel.assert_called_once_with("/tmp/kernel/spyreCodeDir")
         register_kernel_provenance.assert_not_called()
