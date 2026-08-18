@@ -201,8 +201,9 @@ class SpyreAsyncCompile(AsyncCompile):
             cached_dir = get_cached_kernel_dir(cache_key)
             if cached_dir is not None:
                 logger.info("Cache HIT: Using cached kernel from: %s", cached_dir)
-                # Runner points at the persistent cache dir so it is picklable
-                # for FxGraphCache across process restarts.
+                # Runner points at the persistent cache dir, not a temp dir, so
+                # the path stays valid for every later process that re-executes
+                # this wrapper (e.g. on an FxGraphCache hit) and lands here.
                 return SpyreSDSCKernelRunner(
                     kernel_name,
                     cached_dir,

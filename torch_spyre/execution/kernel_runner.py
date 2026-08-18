@@ -49,13 +49,11 @@ class SpyreSDSCKernelRunner:
     """Kernel runner for a compiled SDSC bundle.
 
     The live ``jobplan`` handle (a C-extension object returned by
-    ``prepare_kernel``) is initialised lazily on first use so that this class
-    is fully picklable.  Only ``kernel_name``, ``code_dir`` and the plain-data
-    ``kernel_provenance`` descriptor are serialised; the handle is rebuilt from
-    ``code_dir`` when the object is first called after deserialisation (e.g.
-    after an FxGraphCache round-trip).  ``profiler_event_name`` is derived from
-    ``kernel_provenance`` on access rather than stored, so it needs no
-    serialisation of its own.
+    ``prepare_kernel``) is built lazily on first use rather than in
+    ``__init__``, because ``prepare_kernel`` needs a live C++ ``RuntimeContext``
+    on the process that will launch the kernel.  Construction happens during
+    compilation, which is not necessarily that process, so the handle is
+    deferred to the first ``run()``.
     """
 
     def __init__(
@@ -67,28 +65,11 @@ class SpyreSDSCKernelRunner:
         self.kernel_name = name
         self.code_dir = code_dir
         self.kernel_provenance = kernel_provenance
-        self._jobplan = None  # initialised lazily — not pickled
+        self._jobplan = None  # see the class docstring: built on first run()
 
     # ------------------------------------------------------------------
-    # Pickle support: serialise only the stable, path-based state so that
-    # FxGraphCache can round-trip this object across process restarts.
-    # ------------------------------------------------------------------
-    def __getstate__(self):
-        return {
-            "kernel_name": self.kernel_name,
-            "code_dir": self.code_dir,
-            "kernel_provenance": self.kernel_provenance,
-        }
-
-    def __setstate__(self, state):
-        self.kernel_name = state["kernel_name"]
-        self.code_dir = state["code_dir"]
-        self.kernel_provenance = state["kernel_provenance"]
-        self._jobplan = None  # will be rebuilt on first run()
-
-    # ------------------------------------------------------------------
-    # Derived from ``kernel_provenance`` rather than stored, so that it
-    # survives a pickle round-trip without a second source of truth.
+    # Derived from ``kernel_provenance`` rather than stored, so the two cannot
+    # disagree if ``kernel_provenance`` is ever reassigned.
     # ------------------------------------------------------------------
     @property
     def profiler_event_name(self) -> str | None:
