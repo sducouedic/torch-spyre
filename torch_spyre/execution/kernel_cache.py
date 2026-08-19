@@ -15,7 +15,6 @@
 import json
 import os
 import shutil
-import subprocess
 import uuid
 from collections.abc import Sequence
 from functools import lru_cache
@@ -40,42 +39,48 @@ _REQUIRED_ARTIFACTS = [
 
 
 @lru_cache(maxsize=1)
-def _get_dxp_version() -> str:
-    """Return dxp_standalone version string, used as part of the cache key.
+def _get_spyre_library_versions() -> dict[str, str]:
+    """Return all Spyre library versions (deeptools, senlib, etc.) from LIB_VERSION_FILE.
 
-    Falls back to ``"unknown"`` with a warning if the binary is not found or
-    times out.  The cache will still work but will not be invalidated when
-    ``dxp_standalone`` is upgraded.
+    Reads from the file specified by the LIB_VERSION_FILE environment variable.
+    This file should contain lines in the format "library-name:version".
+    Returns a dict mapping library names to their versions (e.g., ibm-deeptools,
+    ibm-senlib-core).
+
+    Raises RuntimeError if LIB_VERSION_FILE is not set or the file cannot be read.
+    To disable kernel caching, set SPYRE_KERNEL_CACHE=0.
     """
+    lib_version_file = os.environ.get("LIB_VERSION_FILE")
+    if not lib_version_file:
+        raise RuntimeError(
+            "LIB_VERSION_FILE environment variable is required for kernel caching. "
+            "It should point to a .txt file containing Spyre library versions"
+            "versions (deeptools, senlib, etc.). "
+            "To disable caching, set SPYRE_KERNEL_CACHE=0."
+        )
+
     try:
-        result = subprocess.run(
-            ["dxp_standalone", "--version"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        version = result.stdout.strip() or result.stderr.strip()
-        if not version:
-            logger.warning(
-                "dxp_standalone --version produced no output "
-                "(exit code %d); cache key will use 'unknown' for compiler version",
-                result.returncode,
-            )
-            return "unknown"
-        return version
-    except FileNotFoundError:
-        logger.warning(
-            "dxp_standalone not found on PATH; cache key will use 'unknown' "
-            "for compiler version. Kernel cache will not be invalidated on "
-            "compiler upgrades until dxp_standalone is available."
-        )
-        return "unknown"
-    except subprocess.TimeoutExpired:
-        logger.warning(
-            "dxp_standalone --version timed out after 10s; cache key will "
-            "use 'unknown' for compiler version."
-        )
-        return "unknown"
+        libraries = {}
+        with open(lib_version_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or ":" not in line:
+                    continue
+                name, version = line.split(":", 1)
+                libraries[name.strip()] = version.strip()
+        logger.info("Loaded %d Spyre library versions from %s",
+                    len(libraries), lib_version_file)
+        return libraries
+    except FileNotFoundError as e:
+        raise RuntimeError(
+            f"LIB_VERSION_FILE={lib_version_file} not found. "
+            "To disable caching, set SPYRE_KERNEL_CACHE=0."
+        ) from e
+    except Exception as e:
+        raise RuntimeError(
+            f"Error reading Spyre library versions from {lib_version_file}: {e}. "
+            "To disable caching, set SPYRE_KERNEL_CACHE=0."
+        ) from e
 
 
 @lru_cache(maxsize=1)
@@ -163,8 +168,9 @@ def compute_specs_hash(specs: Sequence) -> str:
       but is absent from the ``sdsc_N.json`` dicts.
     * ``torch.__version__`` — invalidates on PyTorch upgrades.
     * ``torch_spyre.__version__`` — invalidates on torch-spyre upgrades.
-    * ``dxp_standalone --version`` — invalidates when the backend compiler
-      that consumes the bundle changes.
+    * Spyre library versions (deeptools, senlib, etc.) from LIB_VERSION_FILE —
+      invalidates when any Spyre tool version changes. Requires LIB_VERSION_FILE
+      to be set; caching is disabled if it is not.
 
     ``bundle.mlir`` is not hashed directly, but everything in it that is not
     already implied by the ``sdsc_N.json`` dicts *is* covered via the
@@ -208,11 +214,16 @@ def compute_specs_hash(specs: Sequence) -> str:
     _collect(specs_list)
 
     content = b"||".join(content_parts)
+
+    # Build Spyre library versions string for cache key (sorted for determinism)
+    library_versions = _get_spyre_library_versions()
+    libraries_str = json.dumps(library_versions, sort_keys=True)
+
     extra = "||".join(
         [
             torch.__version__,
             _get_torch_spyre_version(),
-            _get_dxp_version(),
+            libraries_str,
         ]
     )
 
