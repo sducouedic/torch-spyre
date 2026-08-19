@@ -12,8 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import json
 import os
+import pathlib
 import shutil
 import uuid
 from collections.abc import Sequence
@@ -35,6 +37,19 @@ _REQUIRED_ARTIFACTS = [
     "bundle.mlir",
     os.path.join("spyreCodeDir", "init_binary.bin"),
     os.path.join("spyreCodeDir", "spyrecode.json"),
+]
+
+# Entry points of the artifact-generating code, relative to the torch_spyre
+# package root.  These are *seeds*: the modules they import are discovered
+# automatically (see ``_iter_source_files``), so a new helper module pulled in
+# by any of these is covered without touching this list.  Only add a seed here
+# if it emits artifacts without being reachable from an existing one.
+_ARTIFACT_SOURCE_SEEDS = [
+    os.path.join("_inductor", "codegen", "bundle.py"),
+    os.path.join("_inductor", "codegen", "superdsc.py"),
+    os.path.join("_inductor", "codegen", "compute_ops.py"),
+    os.path.join("_inductor", "codegen", "ktir.py"),
+    os.path.join("_inductor", "op_spec.py"),
 ]
 
 
@@ -68,8 +83,9 @@ def _get_spyre_library_versions() -> dict[str, str]:
                     continue
                 name, version = line.split(":", 1)
                 libraries[name.strip()] = version.strip()
-        logger.info("Loaded %d Spyre library versions from %s",
-                    len(libraries), lib_version_file)
+        logger.info(
+            "Loaded %d Spyre library versions from %s", len(libraries), lib_version_file
+        )
         return libraries
     except FileNotFoundError as e:
         raise RuntimeError(
@@ -83,33 +99,175 @@ def _get_spyre_library_versions() -> dict[str, str]:
         ) from e
 
 
-@lru_cache(maxsize=1)
-def _get_torch_spyre_version() -> str:
-    """Return torch_spyre version string, used as part of the cache key.
+def _package_root() -> pathlib.Path:
+    """Return the on-disk root of the installed ``torch_spyre`` package."""
+    return pathlib.Path(__file__).resolve().parent.parent
 
-    Falls back to ``"unknown"`` with a warning if ``torch_spyre.__version__``
-    is not set.  The cache will still work but will not be invalidated on
-    torch-spyre upgrades.
+
+def _module_to_relpath(module: str, root: pathlib.Path) -> Optional[pathlib.PurePath]:
+    """Map a dotted ``torch_spyre.*`` module name to a path under *root*.
+
+    Returns None for modules that are not plain files in the package (namespace
+    packages, C extensions, or anything outside ``torch_spyre``).
     """
-    try:
-        import torch_spyre
+    if not module.startswith("torch_spyre"):
+        return None
+    tail = module[len("torch_spyre") :].lstrip(".")
+    stem = pathlib.PurePath(*tail.split(".")) if tail else pathlib.PurePath()
 
-        version = getattr(torch_spyre, "__version__", None)
-        if version is None:
-            logger.warning(
-                "torch_spyre.__version__ is not set; cache key will use "
-                "'unknown' for torch-spyre version. Kernel cache will not "
-                "be invalidated on torch-spyre upgrades."
+    as_module = stem.with_suffix(".py") if tail else None
+    if as_module is not None and (root / as_module).is_file():
+        return as_module
+
+    as_package = stem / "__init__.py"
+    if (root / as_package).is_file():
+        return as_package
+
+    return None
+
+
+def _imported_modules(tree: ast.Module, package: str) -> list[str]:
+    """Return the absolute ``torch_spyre.*`` module names imported by *tree*.
+
+    Relative imports are resolved against *package*, the dotted name of the
+    package containing the module being parsed.
+    """
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                # ``from . import x`` / ``from ..y import z`` — walk up
+                # ``level - 1`` packages from the containing package.
+                parts = package.split(".")
+                base = parts[: len(parts) - (node.level - 1)] or parts[:1]
+                prefix = ".".join(base)
+                found.append(f"{prefix}.{node.module}" if node.module else prefix)
+            elif node.module:
+                found.append(node.module)
+    return found
+
+
+@lru_cache(maxsize=1)
+def _iter_source_files() -> tuple[pathlib.PurePath, ...]:
+    """Return the transitive closure of torch-spyre sources that emit artifacts.
+
+    Starts from ``_ARTIFACT_SOURCE_SEEDS`` and follows ``torch_spyre`` imports
+    via the AST, so every module the artifact-generating code actually depends
+    on is included.
+
+    Import discovery is static, so a module reached only through a runtime
+    ``importlib`` call would be missed.  The codegen path does not do that
+    today; a deliberately dynamic import there must be added as a seed.
+
+    Returned paths are relative to the package root and sorted, so the hash is
+    independent of filesystem walk order.
+    """
+    root = _package_root()
+
+    seen: set[pathlib.PurePath] = set()
+    queue: list[pathlib.PurePath] = [
+        pathlib.PurePath(seed) for seed in _ARTIFACT_SOURCE_SEEDS
+    ]
+
+    while queue:
+        rel = queue.pop()
+        if rel in seen:
+            continue
+        path = root / rel
+        if not path.is_file():
+            # A seed that no longer exists means this list has drifted from the
+            # codebase; failing loudly beats hashing a smaller set than
+            # intended, which would silently weaken the key.
+            raise RuntimeError(
+                f"Kernel-cache source seed {rel} not found under {root}. "
+                "Update _ARTIFACT_SOURCE_SEEDS. "
+                "To disable caching, set SPYRE_KERNEL_CACHE=0."
             )
-            return "unknown"
-        return version
-    except ImportError as e:
-        logger.warning(
-            "Could not import torch_spyre to read version (%s); cache key "
-            "will use 'unknown' for torch-spyre version.",
-            e,
-        )
-        return "unknown"
+        seen.add(rel)
+
+        package = "torch_spyre"
+        if rel.parent != pathlib.PurePath("."):
+            package = f"torch_spyre.{'.'.join(rel.parent.parts)}"
+
+        try:
+            tree = ast.parse(path.read_bytes())
+        except SyntaxError as e:
+            raise RuntimeError(
+                f"Could not parse {rel} while building the kernel-cache key: {e}. "
+                "To disable caching, set SPYRE_KERNEL_CACHE=0."
+            ) from e
+
+        for module in _imported_modules(tree, package):
+            dep = _module_to_relpath(module, root)
+            if dep is not None and dep not in seen:
+                queue.append(dep)
+
+    return tuple(sorted(seen))
+
+
+@lru_cache(maxsize=1)
+def _get_torch_spyre_source_hash() -> str:
+    """Hash the torch-spyre code that produces the compiled artifacts.
+
+    ``compute_specs_hash`` replays ``compile_op_spec`` live, so most codegen
+    changes already alter the key through their effect on ``sdsc_json`` and the
+    symbol structure.  That coupling is a property of today's emitter, though,
+    not an invariant the design enforces: code downstream of ``compile_op_spec``
+    (notably ``generate_bundle``'s ``bundle.mlir`` emission) can in principle
+    change its output while the replayed values stay byte-identical.  Hashing
+    the sources closes that gap by construction, so the guarantee no longer
+    rests on a property that has to be re-measured after every emitter change.
+
+    The compiled ``_C`` extension is included as well: the scratchpad packer and
+    layout solver live there, and a rebuild changes artifacts without touching
+    any ``.py`` file.
+
+    Trade-off, stated plainly: this invalidates the cache on source edits that
+    could not have changed the artifacts.  That is deliberate.  A spurious miss
+    costs one recompile; a false hit yields a silently wrong kernel.
+    """
+    root = _package_root()
+
+    hasher_parts: list[bytes] = []
+    for rel in _iter_source_files():
+        hasher_parts.append(str(rel).encode())
+        hasher_parts.append((root / rel).read_bytes())
+
+    # The native extension is a build artifact, not a source file, so it is not
+    # part of the import closure and must be added explicitly.
+    ext_path = root / "_C.so"
+    if ext_path.is_file():
+        hasher_parts.append(b"_C.so")
+        hasher_parts.append(ext_path.read_bytes())
+    else:
+        # An editable install always has it in-tree; a wheel install may name it
+        # with an ABI suffix. Fall back to whatever the loaded module resolves
+        # to so the extension still reaches the key.
+        try:
+            import torch_spyre._C as _C
+
+            ext_file = getattr(_C, "__file__", None)
+            if ext_file and os.path.isfile(ext_file):
+                hasher_parts.append(os.path.basename(ext_file).encode())
+                hasher_parts.append(pathlib.Path(ext_file).read_bytes())
+            else:
+                raise RuntimeError("torch_spyre._C has no file on disk")
+        except Exception as e:
+            raise RuntimeError(
+                f"Could not locate the torch_spyre native extension to hash: {e}. "
+                "A C++ rebuild would not invalidate the kernel cache. "
+                "To disable caching, set SPYRE_KERNEL_CACHE=0."
+            ) from e
+
+    source_hash = code_hash(b"||".join(hasher_parts))
+    logger.info(
+        "torch-spyre source hash over %d module(s) + native extension: %s",
+        len(_iter_source_files()),
+        source_hash,
+    )
+    return source_hash
 
 
 def get_cache_root_dir() -> str:
@@ -167,7 +325,10 @@ def compute_specs_hash(specs: Sequence) -> str:
       the compile-time address arithmetic that is baked into ``bundle.mlir``
       but is absent from the ``sdsc_N.json`` dicts.
     * ``torch.__version__`` — invalidates on PyTorch upgrades.
-    * ``torch_spyre.__version__`` — invalidates on torch-spyre upgrades.
+    * A content hash of the torch-spyre sources that generate the artifacts,
+      plus the native ``_C`` extension — see
+      ``_get_torch_spyre_source_hash``.  This covers emitter changes that do
+      not surface in the replayed values above, and any C++ rebuild.
     * Spyre library versions (deeptools, senlib, etc.) from LIB_VERSION_FILE —
       invalidates when any Spyre tool version changes. Requires LIB_VERSION_FILE
       to be set; caching is disabled if it is not.
@@ -222,7 +383,7 @@ def compute_specs_hash(specs: Sequence) -> str:
     extra = "||".join(
         [
             torch.__version__,
-            _get_torch_spyre_version(),
+            _get_torch_spyre_source_hash(),
             libraries_str,
         ]
     )
