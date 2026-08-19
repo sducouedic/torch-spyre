@@ -696,3 +696,199 @@ class TestKernelProvenancePropagation:
 
         prepare_kernel.assert_called_once_with("/tmp/kernel/spyreCodeDir")
         register_kernel_provenance.assert_not_called()
+
+
+class TestKernelProvenanceCache:
+    """Cache-aware provenance tests: verify descriptor + cache interaction."""
+
+    def _make_simple_spec(self, handle_id: int) -> OpSpec:
+        """Create a minimal OpSpec with given handle ID."""
+        handle = _handle(
+            handle_id,
+            source=SourceLoc("/code.py", 10),
+            aten_op="aten.mm.default",
+        )
+        return _op(handle, op="matmul")
+
+    def test_cache_miss_and_hit_consistency(self):
+        """Unified test: miss/hit consistency, provenance fail-safe, key stability.
+
+        Combines three scenarios under shared mock context:
+        1. Cache miss → hit produces identical event names (flow consistency)
+        2. Provenance failure is handled gracefully (fail-safe path)
+        3. Descriptor key extracted from event name is stable (key consistency)
+        """
+        with (
+            patch(
+                "torch_spyre.execution.async_compile.get_output_dir",
+                return_value="/tmp/kernel",
+            ),
+            patch("torch_spyre.execution.async_compile.generate_bundle"),
+            patch("torch_spyre.execution.async_compile.subprocess.run"),
+            patch("torch_spyre._inductor.config.spyre_kernel_cache", True),
+            patch(
+                "torch_spyre.execution.async_compile.compute_specs_hash",
+                return_value="test_key",
+            ),
+            patch(
+                "torch_spyre.execution.async_compile.get_cached_kernel_dir",
+            ) as mock_cache_get,
+            patch(
+                "torch_spyre.execution.async_compile.allocate_compile_dir",
+                return_value="/tmp/compile_dir",
+            ),
+            patch(
+                "torch_spyre.execution.async_compile.commit_compile_dir",
+                return_value="/tmp/kernel_cached",
+            ),
+            patch(
+                "torch_spyre.execution.kernel_runner.prepare_kernel",
+                return_value="jobplan",
+            ) as mock_prepare,
+            patch(
+                "torch_spyre.execution.kernel_runner.register_kernel_provenance",
+            ) as mock_register,
+            patch("torch_spyre.execution.kernel_runner.torch"),
+        ):
+            # Scenario 1: Cache miss → hit consistency
+            specs_42 = [self._make_simple_spec(42)]
+            mock_cache_get.return_value = None
+            compiler = SpyreAsyncCompile()
+            runner_miss = compiler.sdsc("test_kernel", specs_42)
+            assert runner_miss.kernel_provenance is not None
+            event_name_miss = runner_miss.profiler_event_name
+
+            mock_cache_get.return_value = "/tmp/kernel_cached"
+            runner_hit = compiler.sdsc("test_kernel", specs_42)
+            assert runner_hit.kernel_provenance is not None
+            event_name_hit = runner_hit.profiler_event_name
+
+            assert event_name_miss == event_name_hit, (
+                f"Cache miss and hit should have same event name. "
+                f"Miss: {event_name_miss}, Hit: {event_name_hit}"
+            )
+
+            # Scenario 2: Provenance failure handled (fail-safe)
+            specs_99 = [self._make_simple_spec(99)]
+            with patch(
+                "torch_spyre.execution.async_compile.build_kernel_provenance_descriptor",
+                side_effect=Exception("Provenance construction failed"),
+            ):
+                mock_cache_get.return_value = None
+                runner_fail_safe = compiler.sdsc("test_kernel_failsafe", specs_99)
+
+            assert runner_fail_safe.kernel_provenance is None
+            assert runner_fail_safe.profiler_event_name is None
+            _ = runner_fail_safe.jobplan
+            mock_prepare.assert_called()
+
+            # Scenario 3: Key consistency (extraction matches descriptor)
+            specs_77 = [self._make_simple_spec(77)]
+            mock_cache_get.return_value = None
+            mock_prepare.reset_mock()
+            mock_register.reset_mock()
+
+            runner_key = compiler.sdsc("test_kernel_key", specs_77)
+            assert runner_key.kernel_provenance is not None
+            descriptor_key = runner_key.kernel_provenance.key
+            extracted_key = extract_kernel_provenance_key(
+                runner_key.profiler_event_name
+            )
+
+            assert extracted_key == descriptor_key, (
+                f"Extracted key {extracted_key} doesn't match descriptor {descriptor_key}"
+            )
+
+            _ = runner_key.jobplan
+            mock_register.assert_called()
+
+    def test_cache_enabled_vs_disabled_and_provenance_state_transitions(self):
+        """Unified test: cache enable/disable equivalence and provenance transitions.
+
+        Combines two scenarios:
+        1. Cache enabled vs disabled produces same event name (semantic equivalence)
+        2. Provenance loss/gain transitions during cache hit (state robustness)
+        """
+        with (
+            patch(
+                "torch_spyre.execution.async_compile.get_output_dir",
+                return_value="/tmp/kernel",
+            ),
+            patch("torch_spyre.execution.async_compile.generate_bundle"),
+            patch("torch_spyre.execution.async_compile.subprocess.run"),
+            patch(
+                "torch_spyre.execution.async_compile.compute_specs_hash",
+                return_value="cache_key",
+            ),
+            patch(
+                "torch_spyre.execution.async_compile.get_cached_kernel_dir",
+            ) as mock_cache_get,
+            patch(
+                "torch_spyre.execution.async_compile.allocate_compile_dir",
+                return_value="/tmp/compile",
+            ),
+            patch(
+                "torch_spyre.execution.async_compile.commit_compile_dir",
+                return_value="/tmp/cached",
+            ),
+            patch(
+                "torch_spyre.execution.kernel_runner.prepare_kernel",
+                return_value="jobplan",
+            ),
+            patch("torch_spyre.execution.kernel_runner.torch"),
+        ):
+            # Scenario 1: Cache enabled vs disabled semantic equivalence
+            specs_55 = [self._make_simple_spec(55)]
+
+            with patch("torch_spyre._inductor.config.spyre_kernel_cache", False):
+                compiler1 = SpyreAsyncCompile()
+                runner_disabled = compiler1.sdsc("test_kernel", specs_55)
+                event_name_disabled = runner_disabled.profiler_event_name
+
+            with patch("torch_spyre._inductor.config.spyre_kernel_cache", True):
+                compiler2 = SpyreAsyncCompile()
+                mock_cache_get.return_value = None
+                runner_enabled = compiler2.sdsc("test_kernel", specs_55)
+                event_name_enabled = runner_enabled.profiler_event_name
+
+            assert event_name_disabled == event_name_enabled, (
+                f"Cache-disabled and enabled should produce same event name. "
+                f"Disabled: {event_name_disabled}, Enabled: {event_name_enabled}"
+            )
+
+            # Scenario 2a: Provenance loss during cache hit
+            specs_33 = [self._make_simple_spec(33)]
+            mock_cache_get.return_value = None
+            compiler3 = SpyreAsyncCompile()
+            runner_loss_first = compiler3.sdsc("test_kernel_loss", specs_33)
+            assert runner_loss_first.kernel_provenance is not None
+            assert runner_loss_first.code_dir == "/tmp/cached"
+
+            with patch(
+                "torch_spyre.execution.async_compile.build_kernel_provenance_descriptor",
+                side_effect=Exception("Provenance lost"),
+            ):
+                mock_cache_get.return_value = "/tmp/cached"
+                runner_loss_second = compiler3.sdsc("test_kernel_loss", specs_33)
+
+            assert runner_loss_second.kernel_provenance is None
+            assert runner_loss_second.code_dir == "/tmp/cached"
+
+            # Scenario 2b: Provenance gain during cache hit
+            specs_44 = [self._make_simple_spec(44)]
+            with patch(
+                "torch_spyre.execution.async_compile.build_kernel_provenance_descriptor",
+                side_effect=Exception("Provenance unavailable"),
+            ):
+                mock_cache_get.return_value = None
+                compiler4 = SpyreAsyncCompile()
+                runner_gain_first = compiler4.sdsc("test_kernel_gain", specs_44)
+
+            assert runner_gain_first.kernel_provenance is None
+            assert runner_gain_first.code_dir == "/tmp/cached"
+
+            mock_cache_get.return_value = "/tmp/cached"
+            runner_gain_second = compiler4.sdsc("test_kernel_gain", specs_44)
+
+            assert runner_gain_second.kernel_provenance is not None
+            assert runner_gain_second.code_dir == "/tmp/cached"
