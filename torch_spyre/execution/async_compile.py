@@ -41,6 +41,7 @@ from .kernel_cache import (
     allocate_compile_dir,
     commit_compile_dir,
     compute_specs_hash,
+    get_cache_root_dir,
     get_cached_kernel_dir,
     retain_failed_compile_dir,
 )
@@ -139,6 +140,12 @@ class SpyreAsyncCompile(AsyncCompile):
         super().__init__()
         self._provenance_attempt_count = 0
         self._provenance_failure_count = 0
+        if _spyre_config.spyre_kernel_cache:
+            logger.info(
+                "Spyre kernel cache enabled; cache root: %s", get_cache_root_dir()
+            )
+        else:
+            logger.info("Spyre kernel cache disabled")
 
     def triton(self, *args, **kwargs):
         raise NotImplementedError(
@@ -197,11 +204,11 @@ class SpyreAsyncCompile(AsyncCompile):
             # Hash the specs in-memory BEFORE any disk I/O.  On a cache hit
             # neither generate_bundle nor dxp_standalone runs at all.
             cache_key = compute_specs_hash(specs)
-            logger.info("Bundle cache key: %s", cache_key)
+            logger.debug("Bundle cache key: %s", cache_key)
 
             cached_dir = get_cached_kernel_dir(cache_key)
             if cached_dir is not None:
-                logger.info("Cache HIT: Using cached kernel from: %s", cached_dir)
+                logger.debug("Cache HIT: Using cached kernel from: %s", cached_dir)
                 # Runner points at the persistent cache dir, not a temp dir, so
                 # the path stays valid for every later process that re-executes
                 # this wrapper (e.g. on an FxGraphCache hit) and lands here.
@@ -211,7 +218,7 @@ class SpyreAsyncCompile(AsyncCompile):
                     kernel_provenance=kernel_provenance,
                 )
 
-            logger.info("Cache MISS: Compiling kernel")
+            logger.debug("Cache MISS: Compiling kernel")
 
             # Allocate a temp dir INSIDE the cache root (same filesystem) so
             # the rename in commit_compile_dir is atomic on POSIX.  There is
@@ -239,7 +246,7 @@ class SpyreAsyncCompile(AsyncCompile):
             # dir may already be renamed away, so a commit failure must not
             # send us to rmtree a path that is now the live cache entry.
             cached_dir = commit_compile_dir(compile_dir, cache_key)
-            logger.info("Kernel compiled and cached at: %s", cached_dir)
+            logger.debug("Kernel compiled and cached at: %s", cached_dir)
             return SpyreSDSCKernelRunner(
                 kernel_name,
                 cached_dir,
