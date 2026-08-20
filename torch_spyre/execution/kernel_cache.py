@@ -566,32 +566,55 @@ def retain_failed_compile_dir(tmp_dir: str, cache_key: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+def _is_cache_entry_dir(name: str) -> bool:
+    """Return whether *name* (a cache-root child) is a committed cache entry.
+
+    That is: neither an in-flight ``.tmp.`` compile dir nor the ``failed/``
+    subdir.  Both statistics ``get_cache_stats`` reports share this definition
+    so they cannot describe different sets.
+    """
+    return (
+        not name.endswith(".tmp") and ".tmp." not in name and name != _FAILED_DIR_NAME
+    )
+
+
 def get_cache_stats() -> dict:
-    """Return summary statistics about the persistent kernel cache."""
+    """Return summary statistics about the persistent kernel cache.
+
+    ``cache_size_mb`` counts only committed entries, so it reflects what
+    ``clear_cache`` would actually reclaim as cache content.  Retained failures
+    are reported separately as ``retained_failed_compiles``: they neither
+    satisfy a lookup nor get evicted with one.
+    """
     cache_root = get_cache_root_dir()
+    failed_root = os.path.join(cache_root, _FAILED_DIR_NAME)
 
     if not os.path.exists(cache_root):
-        return {"total_cached_kernels": 0, "cache_size_mb": 0.0}
+        # Keep the key set identical to the populated case, so a caller reading
+        # a field does not have to care whether the cache exists yet.
+        return {
+            "total_cached_kernels": 0,
+            "cache_size_mb": 0.0,
+            "retained_failed_compiles": 0,
+        }
 
     cached_dirs = [
         d
         for d in os.listdir(cache_root)
-        if os.path.isdir(os.path.join(cache_root, d))
-        and not d.endswith(".tmp")
-        and ".tmp." not in d
-        and d != _FAILED_DIR_NAME
+        if os.path.isdir(os.path.join(cache_root, d)) and _is_cache_entry_dir(d)
     ]
 
-    failed_root = os.path.join(cache_root, _FAILED_DIR_NAME)
     total_size = 0
-    for dirpath, dirnames, filenames in os.walk(cache_root):
-        # Retained failures are not cache content: they neither satisfy a lookup
-        # nor get evicted with one, so counting their bytes here would overstate
-        # what clearing the cache would reclaim.
-        if dirpath == cache_root:
-            dirnames[:] = [d for d in dirnames if d != _FAILED_DIR_NAME]
-        for filename in filenames:
-            total_size += os.path.getsize(os.path.join(dirpath, filename))
+    for entry in cached_dirs:
+        for dirpath, _, filenames in os.walk(os.path.join(cache_root, entry)):
+            for filename in filenames:
+                path = os.path.join(dirpath, filename)
+                try:
+                    total_size += os.path.getsize(path)
+                except OSError:
+                    # A concurrent commit or clear can unlink a file mid-walk.
+                    # Stats are advisory; a racing writer must not raise here.
+                    continue
 
     failed_count = len(os.listdir(failed_root)) if os.path.isdir(failed_root) else 0
 

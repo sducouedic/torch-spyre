@@ -651,7 +651,9 @@ class TestSpyreKernelCache(unittest.TestCase):
                 pathlib.Path(tmp_dir, "bundle.mlir").write_bytes(b"x" * 1024)
                 kernel_cache.commit_compile_dir(tmp_dir, key)
 
-            # One retained failure.
+            # One retained failure.  Each non-entry below gets a distinct
+            # payload size, so a regression that wrongly counts one of them
+            # cannot land on the correct total by coincidence.
             failed_tmp = kernel_cache.allocate_compile_dir("key_failed")
             pathlib.Path(failed_tmp, "bundle.mlir").write_bytes(b"y" * 4096)
             self.assertIsNotNone(
@@ -662,6 +664,9 @@ class TestSpyreKernelCache(unittest.TestCase):
             in_flight = kernel_cache.allocate_compile_dir("key_in_flight")
             pathlib.Path(in_flight, "bundle.mlir").write_bytes(b"z" * 2048)
 
+            # A stray file directly in the cache root: not an entry either.
+            pathlib.Path(root, "stray.log").write_bytes(b"w" * 512)
+
             stats = kernel_cache.get_cache_stats()
 
             self.assertEqual(
@@ -671,27 +676,53 @@ class TestSpyreKernelCache(unittest.TestCase):
             )
             self.assertEqual(stats["retained_failed_compiles"], 1)
 
-            # Retained-failure bytes are excluded: clearing the cache would not
-            # reclaim them as cache content, so counting them would overstate
-            # what is reclaimable.  ``cache_size_mb`` does, however, still count
-            # the in-flight ``.tmp.`` dir that ``total_cached_kernels`` skips, so
-            # the two fields describe different sets -- asserted here as current
-            # behaviour rather than as an intended invariant.
-            committed_bytes = 2 * 1024
-            in_flight_bytes = 2048
+            # Both statistics must describe the same set.  ``cache_size_mb`` is
+            # read as "what clearing the cache would reclaim as cache content",
+            # so it counts committed entries only -- not retained failures, not
+            # a concurrent compile's in-flight dir, not stray root files.
             self.assertAlmostEqual(
                 stats["cache_size_mb"],
-                (committed_bytes + in_flight_bytes) / (1024 * 1024),
+                (2 * 1024) / (1024 * 1024),
                 places=6,
-                msg="cache_size_mb should exclude failed/ but currently "
-                "includes in-flight .tmp. dirs",
+                msg="cache_size_mb must count exactly the dirs "
+                "total_cached_kernels counts",
             )
 
             kernel_cache.clear_cache()
 
             self.assertTrue(os.path.isdir(root))
             self.assertEqual(os.listdir(root), [])
-            self.assertEqual(kernel_cache.get_cache_stats()["total_cached_kernels"], 0)
+            cleared = kernel_cache.get_cache_stats()
+            self.assertEqual(cleared["total_cached_kernels"], 0)
+            self.assertEqual(cleared["cache_size_mb"], 0.0)
+            self.assertEqual(cleared["retained_failed_compiles"], 0)
+
+    def test_cache_stats_reports_all_fields_when_root_absent(self):
+        """The key set must not depend on whether the cache root exists yet.
+
+        ``get_cache_stats`` has an early return for a missing root; a caller
+        reading ``retained_failed_compiles`` should not have to guard against a
+        KeyError just because nothing has been compiled yet.
+        """
+        with fresh_cache():
+            root = kernel_cache.get_cache_root_dir()
+            populated = set(kernel_cache.get_cache_stats())
+
+            # get_cache_root_dir() recreates the root, so query the missing-root
+            # branch with it patched to a path that does not exist.
+            absent = os.path.join(root, "does_not_exist")
+            with patch.object(kernel_cache, "get_cache_root_dir", return_value=absent):
+                stats = kernel_cache.get_cache_stats()
+
+        self.assertEqual(set(stats), populated)
+        self.assertEqual(
+            stats,
+            {
+                "total_cached_kernels": 0,
+                "cache_size_mb": 0.0,
+                "retained_failed_compiles": 0,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Step 2 — end-to-end
