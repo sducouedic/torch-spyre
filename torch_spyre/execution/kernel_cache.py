@@ -20,7 +20,7 @@ import shutil
 import uuid
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 from torch._inductor.codecache import code_hash
@@ -102,6 +102,28 @@ def _get_spyre_library_versions() -> dict[str, str]:
             f"Error reading Spyre library versions from {lib_version_file}: {e}. "
             "To disable caching, set SPYRE_KERNEL_CACHE=0."
         ) from e
+
+
+@lru_cache(maxsize=1)
+def _get_system_info() -> dict[str, Any]:
+    """Return system/device info to include when generating the kernel cache key."""
+    return {
+        "device": {
+            "flex_device": os.environ.get("FLEX_DEVICE", ""),
+            "flex_compute": os.environ.get("FLEX_COMPUTE", ""),
+            "world_size": os.environ.get("WORLD_SIZE", "1"),
+        }
+    }
+
+
+@lru_cache(maxsize=1)
+def _get_compile_config() -> dict[str, Any]:
+    """Return compiler options to include when generating the kernel cache key."""
+    return {
+        "lx_planning": os.environ.get("LX_PLANNING", "0"),
+        "hbm_pool_planning": os.environ.get("HBM_POOL_PLANNING", "0"),
+        "layout_solver": os.environ.get("LAYOUT_SOLVER", "greedy"),
+    }
 
 
 def _package_root() -> pathlib.Path:
@@ -337,6 +359,8 @@ def compute_specs_hash(specs: Sequence) -> str:
     * Spyre library versions (deeptools, senlib, etc.) from LIB_VERSION_FILE —
       invalidates when any Spyre tool version changes. Requires LIB_VERSION_FILE
       to be set; caching is disabled if it is not.
+    * System info (device mode, topology) and compiler config (planning/layout
+      env vars) — see ``_get_system_info`` and ``_get_compile_config``.
 
     ``bundle.mlir`` is not hashed directly, but everything in it that is not
     already implied by the ``sdsc_N.json`` dicts *is* covered via the
@@ -385,11 +409,16 @@ def compute_specs_hash(specs: Sequence) -> str:
     library_versions = _get_spyre_library_versions()
     libraries_str = json.dumps(library_versions, sort_keys=True)
 
+    system_info_str = json.dumps(_get_system_info(), sort_keys=True)
+    compile_config_str = json.dumps(_get_compile_config(), sort_keys=True)
+
     extra = "||".join(
         [
             torch.__version__,
             _get_torch_spyre_source_hash(),
             libraries_str,
+            system_info_str,
+            compile_config_str,
         ]
     )
 
