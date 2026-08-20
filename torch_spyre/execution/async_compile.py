@@ -42,6 +42,7 @@ from .kernel_cache import (
     commit_compile_dir,
     compute_specs_hash,
     get_cached_kernel_dir,
+    retain_failed_compile_dir,
 )
 
 if TYPE_CHECKING:
@@ -219,8 +220,19 @@ class SpyreAsyncCompile(AsyncCompile):
             try:
                 _compile_bundle_in_dir(kernel_name, compile_dir, specs)
             except Exception:
-                # Still our private temp dir, and never published.
-                shutil.rmtree(compile_dir, ignore_errors=True)
+                # Never published, so nothing can observe it as a cache entry --
+                # but keep the artifacts: re-running `dxp_standalone -d <dir>`
+                # on them is how this failure gets debugged.  It moves out of
+                # the cache root because that is the commit namespace, not a
+                # place to leave half-written bundles.
+                retained = retain_failed_compile_dir(compile_dir, cache_key)
+                if retained is not None:
+                    logger.warning(
+                        "Kernel %s failed to compile; retained bundle for "
+                        "debugging at %s",
+                        kernel_name,
+                        retained,
+                    )
                 raise
 
             # Outside the cleanup guard on purpose: once commit runs, the temp
@@ -235,12 +247,16 @@ class SpyreAsyncCompile(AsyncCompile):
             )
 
         # Caching disabled (SPYRE_KERNEL_CACHE=0 or force_disable_caches).
-        # Compile into a throw-away temp dir that lives for this process only.
         output_dir = get_output_dir(kernel_name)
         try:
             _compile_bundle_in_dir(kernel_name, output_dir, specs)
         except Exception:
-            shutil.rmtree(output_dir, ignore_errors=True)
+            # Deliberately kept, useful for debugging
+            logger.warning(
+                "Kernel %s failed to compile; retained bundle for debugging at %s",
+                kernel_name,
+                output_dir,
+            )
             raise
 
         return SpyreSDSCKernelRunner(

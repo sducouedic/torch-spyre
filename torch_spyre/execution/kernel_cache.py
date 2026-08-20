@@ -39,6 +39,11 @@ _REQUIRED_ARTIFACTS = [
     os.path.join("spyreCodeDir", "spyrecode.json"),
 ]
 
+# Subdirectory of the cache root holding retained failed compile dirs.  It is a
+# reserved name, not a cache key: cache keys are hex digests, so no key can ever
+# collide with it, and anything enumerating cache entries must skip it.
+_FAILED_DIR_NAME = "failed"
+
 # Entry points of the artifact-generating code, relative to the torch_spyre
 # package root.  These are *seeds*: the modules they import are discovered
 # automatically (see ``_iter_source_files``), so a new helper module pulled in
@@ -490,6 +495,43 @@ def commit_compile_dir(tmp_dir: str, cache_key: str) -> str:
     return cached_dir
 
 
+def retain_failed_compile_dir(tmp_dir: str, cache_key: str) -> Optional[str]:
+    """Move a failed compile dir out of the commit namespace, keeping it on disk.
+
+    A failed ``dxp_standalone`` run is usually only debuggable from the exact
+    directory it was given: re-running ``dxp_standalone -d <dir>`` on the
+    retained bundle reproduces the failure without having to reproduce the whole
+    ``torch.compile`` invocation that emitted it.  So the directory is kept.
+
+    It cannot be kept *where it is*, though.  ``allocate_compile_dir`` places it
+    inside the cache root so that ``commit_compile_dir`` can promote it with an
+    atomic rename; left there, every failure would litter the directory that
+    holds live cache entries.  Moving it under ``failed/`` keeps the cache root
+    free of half-written bundles while preserving the artifacts.
+
+    Returns the retained path, or ``None`` if the directory could not be kept
+    (in which case it is removed -- a failure to *retain* must not leave a
+    partial bundle sitting in the commit namespace).
+    """
+    failed_root = os.path.join(get_cache_root_dir(), _FAILED_DIR_NAME)
+    dest = os.path.join(failed_root, f"{cache_key}.{uuid.uuid4().hex}")
+    try:
+        os.makedirs(failed_root, exist_ok=True)
+        os.rename(tmp_dir, dest)
+    except OSError:
+        # Retention is best-effort; cleanliness of the cache root is not.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        logger.warning(
+            "Could not retain failed compile dir for key %s; removed %s",
+            cache_key,
+            tmp_dir,
+            exc_info=True,
+        )
+        return None
+
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
@@ -508,16 +550,26 @@ def get_cache_stats() -> dict:
         if os.path.isdir(os.path.join(cache_root, d))
         and not d.endswith(".tmp")
         and ".tmp." not in d
+        and d != _FAILED_DIR_NAME
     ]
 
+    failed_root = os.path.join(cache_root, _FAILED_DIR_NAME)
     total_size = 0
-    for dirpath, _dirnames, filenames in os.walk(cache_root):
+    for dirpath, dirnames, filenames in os.walk(cache_root):
+        # Retained failures are not cache content: they neither satisfy a lookup
+        # nor get evicted with one, so counting their bytes here would overstate
+        # what clearing the cache would reclaim.
+        if dirpath == cache_root:
+            dirnames[:] = [d for d in dirnames if d != _FAILED_DIR_NAME]
         for filename in filenames:
             total_size += os.path.getsize(os.path.join(dirpath, filename))
+
+    failed_count = len(os.listdir(failed_root)) if os.path.isdir(failed_root) else 0
 
     return {
         "total_cached_kernels": len(cached_dirs),
         "cache_size_mb": total_size / (1024 * 1024),
+        "retained_failed_compiles": failed_count,
     }
 
 
