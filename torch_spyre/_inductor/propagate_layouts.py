@@ -62,9 +62,9 @@ from .constants import (
     ELIDED_COPY_BACK_ATTR,
     REDUCTIONS_NON_STICK_DIM_ONLY,
     STAGGERED_EAS,
-    TOPK_OPS,
 )
 from .ir import (
+    AllGatherAsyncFallback,
     AllReduceAsyncFallback,
     FixedTiledLayout,
     SpyreConstantFallback,
@@ -83,6 +83,7 @@ from .pass_utils import (
     try_device_coordinates,
     indirect_info_from_op,
     is_stick_expr_offset_free,
+    is_topk,
     iter_var_id,
 )
 from .optimize_restickify import AllSameNode, AnyInNode, FixedInOutNode
@@ -1337,7 +1338,7 @@ def compute_layouts(
     if isinstance(data, Reduction) and data.reduction_type == "exx2":
         return _exx2_layout(op, output, output_dep, args)
 
-    if isinstance(data, Reduction) and data.reduction_type in TOPK_OPS:
+    if is_topk(op):
         return _topk_layouts(op, output, output_dep, args)
 
     aten_op = next(iter(data.origins)).target if data.origins else None
@@ -1445,6 +1446,25 @@ def _target_device_layout(target, name: str):
     # candidate layouts on the TensorBox rather than a finalized committed_stl.
     graph_input = V.graph.graph_inputs.get(name)
     layouts = getattr(graph_input, "layouts", None)
+    if not layouts:
+        # Also check candidate layouts set by propagate_layouts on the producing
+        # ComputedBuffer (e.g. a constant-fill op that precedes the copy_forced).
+        # Exclude SpyreEmptyFallback and SpyreConstantFallback: those are
+        # synthetic buffers whose layouts must be derived from their first
+        # writer, not locked here. Only use this when the producer has a
+        # single unambiguous candidate: with multiple candidates, arbitrarily
+        # picking next(iter(...)) here would lock the mutation op (and
+        # everything downstream of it) onto one candidate even when the
+        # beam search needs the freedom to pick a different one -- mirrors
+        # the same single-candidate guard in the copy-back elision pass
+        # above.
+        buf = V.graph.get_buffer(name) if name else None
+        if buf is not None and not isinstance(
+            buf, (SpyreEmptyFallback, SpyreConstantFallback)
+        ):
+            buf_layouts = getattr(buf, "layouts", None)
+            if buf_layouts and len(buf_layouts) == 1:
+                layouts = buf_layouts
 
     if not layouts:
         return None
@@ -1972,6 +1992,9 @@ def propagate_spyre_tensor_layouts(
             input_name = op.inputs[0].get_name()
             input_buf = V.graph.get_buffer(input_name)
             op.layouts = list(input_buf.layouts)
+            op.restick_cost_fn = AnyInNode.from_args()
+        elif isinstance(op, AllGatherAsyncFallback):
+            op.layouts = [generic_layout(op)]
             op.restick_cost_fn = AnyInNode.from_args()
         elif isinstance(op, ExternKernel):
             logger.warning(f"unhandled node type {type(op)}")

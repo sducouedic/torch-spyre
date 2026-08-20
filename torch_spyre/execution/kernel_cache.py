@@ -335,7 +335,7 @@ def _symbol_kind_key(kind) -> list:
     ]
 
 
-def compute_specs_hash(specs: Sequence) -> str:
+def compute_specs_hash(specs: Sequence, pool_size: int = 0) -> str:
     """Compute a cache key directly from OpSpec objects — no disk I/O required.
 
     This is the preferred hashing entry point.  Because it operates entirely
@@ -361,6 +361,10 @@ def compute_specs_hash(specs: Sequence) -> str:
       to be set; caching is disabled if it is not.
     * System info (device mode, topology) and compiler config (planning/layout
       env vars) — see ``_get_system_info`` and ``_get_compile_config``.
+    * ``pool_size`` — emitted verbatim into ``bundle.mlir`` as the
+      ``device_mem_allocate`` byte count, so it is not implied by the specs.
+      Two graphs whose specs match but whose HBM pools differ must not share
+      an entry.
 
     ``bundle.mlir`` is not hashed directly, but everything in it that is not
     already implied by the ``sdsc_N.json`` dicts *is* covered via the
@@ -419,6 +423,7 @@ def compute_specs_hash(specs: Sequence) -> str:
             libraries_str,
             system_info_str,
             compile_config_str,
+            f"pool_size={pool_size}",
         ]
     )
 

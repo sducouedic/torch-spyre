@@ -97,6 +97,7 @@ def _compile_bundle_in_dir(
     kernel_name: str,
     output_dir: str,
     specs: Sequence[OpSpec | LoopSpec | UnimplementedOp],
+    pool_size: int = 0,
 ) -> None:
     """Emit the SDSC bundle into ``output_dir`` and compile it with dxp_standalone.
 
@@ -111,7 +112,7 @@ def _compile_bundle_in_dir(
     exists.
     """
     try:
-        generate_bundle(kernel_name, output_dir, specs)
+        generate_bundle(kernel_name, output_dir, specs, pool_size=pool_size)
 
         with torch.profiler.record_function(f"dxp_standalone:{kernel_name}"):
             subprocess.run(["dxp_standalone", "-d", output_dir], check=True)
@@ -185,7 +186,10 @@ class SpyreAsyncCompile(AsyncCompile):
             return None
 
     def sdsc(
-        self, kernel_name: str, specs: Sequence[OpSpec | LoopSpec | UnimplementedOp]
+        self,
+        kernel_name: str,
+        specs: Sequence[OpSpec | LoopSpec | UnimplementedOp],
+        pool_size: int = 0,
     ):
         unimp = find_unimplemented(list(specs))
         if unimp is not None:
@@ -203,7 +207,7 @@ class SpyreAsyncCompile(AsyncCompile):
         if use_cache:
             # Hash the specs in-memory BEFORE any disk I/O.  On a cache hit
             # neither generate_bundle nor dxp_standalone runs at all.
-            cache_key = compute_specs_hash(specs)
+            cache_key = compute_specs_hash(specs, pool_size=pool_size)
             logger.debug("Bundle cache key: %s", cache_key)
 
             cached_dir = get_cached_kernel_dir(cache_key)
@@ -225,7 +229,9 @@ class SpyreAsyncCompile(AsyncCompile):
             # no separate workspace: dxp_standalone writes directly here.
             compile_dir = allocate_compile_dir(cache_key)
             try:
-                _compile_bundle_in_dir(kernel_name, compile_dir, specs)
+                _compile_bundle_in_dir(
+                    kernel_name, compile_dir, specs, pool_size=pool_size
+                )
             except Exception:
                 # Never published, so nothing can observe it as a cache entry --
                 # but keep the artifacts: re-running `dxp_standalone -d <dir>`
@@ -256,7 +262,7 @@ class SpyreAsyncCompile(AsyncCompile):
         # Caching disabled (SPYRE_KERNEL_CACHE=0 or force_disable_caches).
         output_dir = get_output_dir(kernel_name)
         try:
-            _compile_bundle_in_dir(kernel_name, output_dir, specs)
+            _compile_bundle_in_dir(kernel_name, output_dir, specs, pool_size=pool_size)
         except Exception:
             # Deliberately kept, useful for debugging
             logger.warning(
