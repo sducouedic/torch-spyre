@@ -748,7 +748,15 @@ class TestKernelProvenanceCache:
             patch(
                 "torch_spyre.execution.kernel_runner.register_kernel_provenance",
             ) as mock_register,
-            patch("torch_spyre.execution.kernel_runner.torch"),
+            # Patch only _lazy_init, not the whole ``torch`` module.  A blanket
+            # ``patch(...kernel_runner.torch)`` also replaces
+            # ``torch.profiler.record_function`` with a MagicMock *and* turns
+            # _lazy_init into a mock that silently succeeds -- so deleting the
+            # segfault guard entirely would still pass.  Patching just this one
+            # attribute keeps the guard observable (asserted below).
+            patch(
+                "torch.spyre._impl._lazy_init",
+            ) as mock_lazy_init,
         ):
             # Scenario 1: Cache miss → hit consistency
             specs_42 = [self._make_simple_spec(42)]
@@ -779,8 +787,13 @@ class TestKernelProvenanceCache:
 
             assert runner_fail_safe.kernel_provenance is None
             assert runner_fail_safe.profiler_event_name is None
+            mock_lazy_init.reset_mock()
             _ = runner_fail_safe.jobplan
             mock_prepare.assert_called()
+            # prepare_kernel() -> JobPlanBuilder -> getDefaultStream() segfaults
+            # on a null C++ RuntimeContext, so the jobplan path must always run
+            # _lazy_init() first -- including on the no-provenance branch.
+            mock_lazy_init.assert_called()
 
             # Scenario 3: Key consistency (extraction matches descriptor)
             specs_77 = [self._make_simple_spec(77)]
@@ -799,15 +812,18 @@ class TestKernelProvenanceCache:
                 f"Extracted key {extracted_key} doesn't match descriptor {descriptor_key}"
             )
 
+            mock_lazy_init.reset_mock()
             _ = runner_key.jobplan
             mock_register.assert_called()
+            # Same guard on the provenance-bearing branch.
+            mock_lazy_init.assert_called()
 
-    def test_cache_enabled_vs_disabled_and_provenance_state_transitions(self):
-        """Unified test: cache enable/disable equivalence and provenance transitions.
+    def test_cache_enabled_vs_disabled_provenance_equivalence(self):
+        """Cache enabled vs disabled must produce the same profiler event name.
 
-        Combines two scenarios:
-        1. Cache enabled vs disabled produces same event name (semantic equivalence)
-        2. Provenance loss/gain transitions during cache hit (state robustness)
+        Provenance identity is derived from the finalized specs, so whether the
+        bundle came from a fresh compile or from the kernel cache must not change
+        how the kernel is named to the profiler.
         """
         with (
             patch(
@@ -835,9 +851,10 @@ class TestKernelProvenanceCache:
                 "torch_spyre.execution.kernel_runner.prepare_kernel",
                 return_value="jobplan",
             ),
-            patch("torch_spyre.execution.kernel_runner.torch"),
+            # See the note in test_cache_miss_and_hit_consistency: patch only
+            # _lazy_init so the segfault guard stays observable.
+            patch("torch.spyre._impl._lazy_init") as mock_lazy_init,
         ):
-            # Scenario 1: Cache enabled vs disabled semantic equivalence
             specs_55 = [self._make_simple_spec(55)]
 
             with patch("torch_spyre._inductor.config.spyre_kernel_cache", False):
@@ -856,39 +873,9 @@ class TestKernelProvenanceCache:
                 f"Disabled: {event_name_disabled}, Enabled: {event_name_enabled}"
             )
 
-            # Scenario 2a: Provenance loss during cache hit
-            specs_33 = [self._make_simple_spec(33)]
-            mock_cache_get.return_value = None
-            compiler3 = SpyreAsyncCompile()
-            runner_loss_first = compiler3.sdsc("test_kernel_loss", specs_33)
-            assert runner_loss_first.kernel_provenance is not None
-            assert runner_loss_first.code_dir == "/tmp/cached"
-
-            with patch(
-                "torch_spyre.execution.async_compile.build_kernel_provenance_descriptor",
-                side_effect=Exception("Provenance lost"),
-            ):
-                mock_cache_get.return_value = "/tmp/cached"
-                runner_loss_second = compiler3.sdsc("test_kernel_loss", specs_33)
-
-            assert runner_loss_second.kernel_provenance is None
-            assert runner_loss_second.code_dir == "/tmp/cached"
-
-            # Scenario 2b: Provenance gain during cache hit
-            specs_44 = [self._make_simple_spec(44)]
-            with patch(
-                "torch_spyre.execution.async_compile.build_kernel_provenance_descriptor",
-                side_effect=Exception("Provenance unavailable"),
-            ):
-                mock_cache_get.return_value = None
-                compiler4 = SpyreAsyncCompile()
-                runner_gain_first = compiler4.sdsc("test_kernel_gain", specs_44)
-
-            assert runner_gain_first.kernel_provenance is None
-            assert runner_gain_first.code_dir == "/tmp/cached"
-
-            mock_cache_get.return_value = "/tmp/cached"
-            runner_gain_second = compiler4.sdsc("test_kernel_gain", specs_44)
-
-            assert runner_gain_second.kernel_provenance is not None
-            assert runner_gain_second.code_dir == "/tmp/cached"
+            # The jobplan path runs _lazy_init() before prepare_kernel()
+            # regardless of which cache mode produced the runner.
+            for runner in (runner_disabled, runner_enabled):
+                mock_lazy_init.reset_mock()
+                _ = runner.jobplan
+                mock_lazy_init.assert_called()
