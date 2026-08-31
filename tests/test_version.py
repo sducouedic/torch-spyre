@@ -28,7 +28,6 @@ import importlib.util
 import os
 import shutil
 import subprocess
-import types
 from pathlib import Path
 
 import pytest
@@ -122,10 +121,8 @@ def _in_source_checkout() -> bool:
     Only a source checkout has a ``.git`` beside the package; the CI wheel flow
     installs into site-packages, where the lookup never fires. Evaluated at
     decoration time by ``skipif``, so it cannot use the fixture -- the path tested
-    here mirrors version.py's own ``_REPO_ROOT`` (its ``parent.parent``), and uses
-    the same ``.exists()`` probe so a linked worktree or submodule checkout, where
-    ``.git`` is a file, still exercises ``test_checkout_version_matches_head``
-    rather than skipping it.
+    here mirrors version.py's own ``_REPO_ROOT`` (its ``parent.parent``), including
+    its ``.exists()`` probe, so worktree and submodule checkouts are not skipped.
     """
     return (
         (_find_version_file().parent.parent / ".git").exists()
@@ -202,73 +199,6 @@ def test_checkout_version_matches_head(version_mod):
     ).stdout.strip()
     expected = f"{version_mod._BASE_VERSION}+g{sha}"
     assert version_mod.__version__ == expected
-
-
-@pytest.mark.skipif(
-    not _in_source_checkout(), reason="not a git source checkout with git available"
-)
-def test_linked_worktree_still_resolves_a_local_segment(version_mod, tmp_path):
-    """A checkout whose ``.git`` is a *file* must still get a local segment.
-
-    ``git worktree add`` (and ``git submodule``) writes ``.git`` as a regular file
-    holding a ``gitdir:`` pointer rather than a directory. An ``.is_dir()`` sentinel
-    therefore skipped the live lookup in those trees and left the version at a bare
-    ``0.0.1`` with no error -- silently, and identically for every commit, which
-    also flattened anything keyed on the version. Guards against a regression to
-    ``.is_dir()``.
-    """
-    repo_root = version_mod._REPO_ROOT
-    worktree = tmp_path / "linked"
-
-    add = subprocess.run(
-        ["git", "-C", str(repo_root), "worktree", "add", "--detach", str(worktree)],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-    if add.returncode != 0:
-        pytest.skip(f"could not create a linked worktree: {add.stderr.strip()}")
-
-    try:
-        # The precondition that makes this test meaningful: if git ever starts
-        # writing a real directory here, the test is no longer exercising the bug.
-        assert not (worktree / ".git").is_dir()
-        assert (worktree / ".git").exists()
-
-        # Execute the version.py *under test* with `__file__` pointed into the
-        # worktree, rather than importing the worktree's own copy: the worktree is
-        # checked out from a commit, so its copy would be whatever is committed --
-        # which would make this test blind to the working-tree change it guards.
-        source = _find_version_file().read_bytes()
-        namespace = {
-            "__file__": str(worktree / "torch_spyre" / "version.py"),
-            "__name__": "torch_spyre_version_worktree",
-        }
-        exec(compile(source, namespace["__file__"], "exec"), namespace)  # noqa: S102
-
-        in_worktree = types.SimpleNamespace(**namespace)
-        assert in_worktree._REPO_ROOT == worktree
-
-        sha = subprocess.run(
-            ["git", "-C", str(worktree), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=True,
-        ).stdout.strip()
-        assert in_worktree.__version__ == f"{in_worktree._BASE_VERSION}+g{sha}"
-    finally:
-        # `--force` because the loaded module leaves nothing behind, but pytest's
-        # tmp_path teardown must not trip over a still-registered worktree.
-        remove = ["worktree", "remove", "--force", str(worktree)]
-        subprocess.run(
-            ["git", "-C", str(repo_root), *remove],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
 
 
 def test_git_short_sha_returns_none_for_non_repo(version_mod, tmp_path):

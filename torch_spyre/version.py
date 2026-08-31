@@ -52,11 +52,8 @@ _BASE_VERSION = __version__
 _NO_GIT = os.environ.get("TORCH_SPYRE_VERSION_NO_GIT") == "1"
 
 # A `.git` entry beside the package directory is the source-checkout signal; an
-# installed wheel has none. Tested with `.exists()`, not `.is_dir()`: git only
-# writes a directory for a primary clone, and leaves a *file* holding a `gitdir:`
-# pointer in a linked worktree (`git worktree add`) and in a submodule. Those are
-# ordinary development checkouts, and `is_dir()` silently demoted them to a bare
-# `0.0.1`.
+# installed wheel has none. `.exists()`, not `.is_dir()`: git writes `.git` as a
+# file, not a directory, in a linked worktree and in a submodule.
 #
 # `__file__` is looked up defensively because setup.py also reads this module with
 # `exec(f.read(), ns)`, and a bare `__file__` would raise NameError in a namespace
@@ -98,8 +95,8 @@ def _git_short_sha(repo_root: Path) -> str | None:
 # `git describe --tags` because this repo has zero tags and CI checks out shallow
 # without fetch-tags, so `describe` fails outright.
 #
-# The `.git` probe comes last so an installed wheel spawns no subprocess at all.
-# The `"+" not in __version__` test makes the block idempotent and leaves an
+# `.exists()` comes last so an installed wheel spawns no subprocess at all. The
+# `"+" not in __version__` test makes the block idempotent and leaves an
 # already-stamped wheel inert, so a wheel unpacked next to an unrelated checkout
 # cannot claim that repository's commit.
 if not _NO_GIT and "+" not in __version__ and (_REPO_ROOT / ".git").exists():
