@@ -202,13 +202,20 @@ def _get_torch_spyre_version() -> str:
     return __version__
 
 
-@lru_cache(maxsize=1)
 def _get_compile_config() -> str:
     """Return a sorted-JSON string of all config knobs that influence compiled output.
 
     This covers every ``torch_spyre._inductor.config`` value and environment
     variable that dxp_standalone or the SDSC bundle emitter reads.  Changing
     any of these must produce a different cache key.
+
+    Deliberately NOT memoised: ``config.patch()`` (used pervasively in tests
+    and by callers that recompile under a different configuration) mutates
+    these values at runtime, so the snapshot must be re-read on every call.
+    Caching it with ``lru_cache`` freezes the first-seen configuration into
+    every subsequent key and silently serves kernels compiled under a
+    different config -- a stale hit that produces wrong numerics rather than
+    a visible error.
     """
     from torch_spyre._inductor import config as c
 
@@ -218,6 +225,7 @@ def _get_compile_config() -> str:
         "bundle_symbolic_args": c.bundle_symbolic_args,
         "layout_solver": c.layout_solver,
         # Planning toggles
+        "frontend_pool_allocation": c.frontend_pool_allocation,
         "lx_planning": c.lx_planning,
         "co_optimizing_lx_planning": c.co_optimizing_lx_planning,
         "hbm_pool_planning": c.hbm_pool_planning,

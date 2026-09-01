@@ -724,25 +724,26 @@ class TestHbmPoolPlanningE2E(InductorTestCase):
 
         x = torch.randn(64, 64, dtype=torch.float16, device="spyre")
 
-        # get_output_dir() mints a fresh random tempdir on every call (see
-        # its uuid4()-based implementation), so it cannot be re-invoked from
-        # the test to recover the directory sdsc() actually used to write
-        # bundle.mlir. Wrap it to record kernel_name -> output_dir while
-        # still delegating to the real implementation.
-        real_get_output_dir = async_compile_mod.get_output_dir
+        # The directory holding each bundle.mlir is minted internally by
+        # sdsc() and cannot be re-derived from the test: get_output_dir()
+        # mints a uuid4() tempdir when the kernel cache is off, and on the
+        # cache path the compile dir is additionally renamed to its final
+        # <cache_root>/<key>/ location by commit_compile_dir(). Record the
+        # directory that sdsc() ultimately settled on by wrapping the runner
+        # it returns -- code_dir is the post-commit path on every path.
+        real_runner_type = async_compile_mod.SpyreSDSCKernelRunner
         output_dirs_by_kernel = {}
 
-        def _recording_get_output_dir(kernel_name):
-            output_dir = real_get_output_dir(kernel_name)
-            output_dirs_by_kernel[kernel_name] = output_dir
-            return output_dir
+        def _recording_runner(kernel_name, code_dir, **kwargs):
+            output_dirs_by_kernel[kernel_name] = code_dir
+            return real_runner_type(kernel_name, code_dir, **kwargs)
 
         with (
             mock_patch(_LAUNCH_JOBPLAN),
             mock_patch(_PREPARE_KERNEL),
             mock_patch("subprocess.run"),
             mock_patch.object(
-                async_compile_mod, "get_output_dir", _recording_get_output_dir
+                async_compile_mod, "SpyreSDSCKernelRunner", _recording_runner
             ),
             pytest.warns(UserWarning),
         ):

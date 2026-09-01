@@ -197,6 +197,65 @@ class TestDifferentOpsProduceDifferentKeys(unittest.TestCase):
             )
 
 
+class TestCompileConfigAffectsCacheKey(unittest.TestCase):
+    """A config knob that changes compiled output must change the cache key.
+
+    Regression guard for two distinct ways this silently broke: memoising the
+    config snapshot (so ``config.patch()`` never reached the key), and simply
+    omitting a knob that ``generate_bundle`` branches on. Both produce a stale
+    cache HIT that returns a kernel compiled under a different configuration --
+    wrong numerics, no error.
+    """
+
+    # Knobs that generate_bundle / the SDSC emitter branch on, and so must be
+    # part of the cache key. Each maps to a value differing from the default.
+    EMISSION_KNOBS = {
+        "frontend_pool_allocation": True,
+        "sencores": 4,
+        "hbm_pool_planning": False,
+        "lx_planning": False,
+        "enable_reduction_tiling": False,
+        "core_id_k_fast_emission": False,
+        "ignore_span_overflow_hints": False,
+    }
+
+    def test_each_emission_knob_changes_the_key(self):
+        from torch_spyre._inductor import config as spyre_config
+        from torch_spyre.execution.kernel_cache import _get_compile_config
+
+        baseline = _get_compile_config()
+        for knob, value in self.EMISSION_KNOBS.items():
+            with self.subTest(knob=knob):
+                self.assertNotEqual(
+                    getattr(spyre_config, knob),
+                    value,
+                    f"{knob} test value equals the default; pick a different one",
+                )
+                with spyre_config.patch({knob: value}):
+                    patched = _get_compile_config()
+                self.assertNotEqual(
+                    baseline,
+                    patched,
+                    f"config.{knob} does not affect the cache key: a kernel "
+                    f"compiled with {knob}={value} would be served from a cache "
+                    f"entry compiled with the default value",
+                )
+
+    def test_config_snapshot_is_not_memoised(self):
+        """_get_compile_config must re-read config on every call, not cache it."""
+        from torch_spyre._inductor import config as spyre_config
+        from torch_spyre.execution.kernel_cache import _get_compile_config
+
+        # Prime any accidental memoisation with the default config first.
+        _get_compile_config()
+        with spyre_config.patch({"sencores": 4}):
+            under_patch = _get_compile_config()
+        after = _get_compile_config()
+
+        self.assertIn('"sencores": 4', under_patch)
+        self.assertNotIn('"sencores": 4', after)
+
+
 class TestSameOpReusesCacheEntry(unittest.TestCase):
     def test_same_op_compiled_twice_uses_same_cache_entry(self):
         """Compiling the same op twice must not create duplicate cache entries."""
