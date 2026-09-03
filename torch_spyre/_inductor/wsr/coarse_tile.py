@@ -3599,13 +3599,18 @@ class _NameSwapHandler(WrapperHandler):
     def load(self, name, index):
         if name in self._name_map:
             new_name, full_strides, tile_strides = self._name_map[name]
-            new_index = _rescale_index(index, full_strides, tile_strides)
+            new_index = _rescale_index(
+                index, full_strides, tile_strides, strip_constant=True
+            )
             return super().load(new_name, new_index)
         return super().load(name, index)
 
 
 def _rescale_index(
-    index: Expr, full_strides: list[Expr], tile_strides: list[Expr]
+    index: Expr,
+    full_strides: list[Expr],
+    tile_strides: list[Expr],
+    strip_constant: bool = False,
 ) -> Expr:
     """Rescale an affine index's per-dimension coefficients.
 
@@ -3696,7 +3701,8 @@ def _rescale_index(
     new_index: Expr = sympy.Integer(0)
     for term in sympy.Add.make_args(index):
         if term.is_number:
-            new_index += term
+            if not strip_constant:
+                new_index += term
             continue
         for i, (full_stride, tile_stride) in enumerate(remaining):
             matched, loop_var_part = _divides_evenly(term, full_stride)
@@ -5758,7 +5764,7 @@ def _index_var_prefix(free_symbols: "OrderedSet[Expr] | set[Expr]") -> str:
     from any sibling symbol already present in the index instead of
     assuming one.
     """
-    for sym in free_symbols:
+    for sym in sorted(free_symbols, key=str):
         name = sym.name
         i = len(name)
         while i > 0 and name[i - 1].isdigit():
