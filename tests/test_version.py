@@ -32,6 +32,7 @@ import types
 from pathlib import Path
 
 import pytest
+import regex as re
 
 
 def _find_version_file() -> Path:
@@ -202,13 +203,42 @@ def test_checkout_version_matches_head(version_mod):
     assert version_mod.__version__ == expected
 
 
+# Inverse of setup.py's ``_VERSION_LITERAL_RE`` stamp: matches the single
+# top-level ``__version__ = "..."`` literal so it can be rewritten back to the
+# bare base version.
+_VERSION_LITERAL_RE = re.compile(rb'^__version__ = "([^"]*)"$', re.MULTILINE)
+
+
+def _unstamped_version_source() -> bytes:
+    """version.py's source with ``__version__`` reset to the bare base version.
+
+    The installed copy the CI wheel flow resolves to is already stamped, which
+    makes the probe tests vacuous: the resolution block is guarded by ``"+" not in
+    __version__``. Unstamping keeps that branch live in both layouts.
+    """
+    source = _find_version_file().read_bytes()
+    match = _VERSION_LITERAL_RE.search(source)
+    assert match is not None, (
+        "no top-level '__version__ = \"...\"' literal in "
+        f"{_find_version_file()}: it has been moved, reformatted or re-quoted, and "
+        "setup.py's BuildPyWithVersion has drifted with it"
+    )
+    # The public prefix, not a hardcoded "0.0.1", so a base-version bump is fine.
+    base = match.group(1).split(b"+", 1)[0]
+    unstamped, count = _VERSION_LITERAL_RE.subn(
+        b'__version__ = "' + base + b'"', source, count=1
+    )
+    assert count == 1
+    return unstamped
+
+
 def _load_version_module_at(module_path: Path):
     """Execute version.py with ``__file__`` set to ``module_path``.
 
-    Contents come from the copy under test, but ``_REPO_ROOT`` follows
+    Contents come from the copy under test (unstamped), but ``_REPO_ROOT`` follows
     ``module_path`` -- which is what lets a test aim the probe at a synthetic tree.
     """
-    source = _find_version_file().read_bytes()
+    source = _unstamped_version_source()
     namespace = {"__file__": str(module_path), "__name__": "torch_spyre_version_probe"}
     exec(compile(source, str(module_path), "exec"), namespace)  # noqa: S102
     return types.SimpleNamespace(**namespace)
@@ -259,8 +289,6 @@ def test_dot_git_file_still_resolves_a_local_segment(tmp_path, monkeypatch):
 def test_tree_without_dot_git_gets_no_local_segment(tmp_path, monkeypatch):
     """No ``.git`` beside the package means a bare base version (the wheel case)."""
     monkeypatch.delenv("TORCH_SPYRE_VERSION_NO_GIT", raising=False)
-    if "+" in _read_static_version():
-        pytest.skip("version.py on disk is already stamped (CI wheel flow)")
 
     (tmp_path / "torch_spyre").mkdir()
     probed = _load_version_module_at(tmp_path / "torch_spyre" / "version.py")
