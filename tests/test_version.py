@@ -274,7 +274,7 @@ def test_dot_git_file_still_resolves_a_local_segment(tmp_path, monkeypatch):
     assert (linked / ".git").exists()
 
     probed = _load_version_module_at(linked / "torch_spyre" / "version.py")
-    assert probed._REPO_ROOT == linked
+    assert probed._REPO_ROOT == linked.resolve()
 
     sha = subprocess.run(
         ["git", "-C", str(linked), "rev-parse", "--short", "HEAD"],
