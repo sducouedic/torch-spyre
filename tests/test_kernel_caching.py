@@ -34,6 +34,8 @@ import torch_spyre._inductor.config as spyre_config
 from torch._inductor.utils import fresh_cache
 
 from torch_spyre.execution.kernel_cache import (
+    _FAILED_DIR_NAME,
+    _move_to_failed_dir,
     allocate_compile_dir,
     commit_compile_dir,
     get_cache_root_dir,
@@ -143,26 +145,25 @@ class TestPartialCacheEntryTreatedAsMiss(unittest.TestCase):
 class TestCacheDisabledViaConfig(unittest.TestCase):
     def test_cache_disabled_leaves_cache_empty(self):
         """With spyre_kernel_cache=False, the kernel cache must remain empty."""
-        import torch_spyre._inductor.config as spyre_config
-
-        with fresh_cache():
+        with fresh_cache(), spyre_config.patch({"spyre_kernel_cache": False}):
             torch._dynamo.reset()
-            original = spyre_config.spyre_kernel_cache
-            spyre_config.spyre_kernel_cache = False
-            try:
-                torch.compile(_simple_fn)(_make_input())
-                self.assertEqual(
-                    get_cache_stats()["total_cached_kernels"],
-                    0,
-                    "Expected empty cache when spyre_kernel_cache=False",
-                )
-            finally:
-                spyre_config.spyre_kernel_cache = original
+            torch.compile(_simple_fn)(_make_input())
+            self.assertEqual(
+                get_cache_stats()["total_cached_kernels"],
+                0,
+                "Expected empty cache when spyre_kernel_cache=False",
+            )
 
 
 class TestForceDisableCaches(unittest.TestCase):
     def test_force_disable_caches_leaves_cache_empty(self):
-        """torch._inductor.config.force_disable_caches must bypass the Spyre cache."""
+        """torch._inductor.config.force_disable_caches must bypass the Spyre cache.
+
+        Deliberately does not patch spyre_kernel_cache: it relies on the default
+        being on, so force_disable_caches is the only thing suppressing the cache
+        here. If the default were ever flipped back off this assertion would pass
+        for the wrong reason, so pair any such change with an explicit patch.
+        """
         with fresh_cache():
             torch._dynamo.reset()
             with torch._inductor.config.patch({"force_disable_caches": True}):
@@ -198,7 +199,14 @@ class TestDifferentOpsProduceDifferentKeys(unittest.TestCase):
 
 class TestSameOpReusesCacheEntry(unittest.TestCase):
     def test_same_op_compiled_twice_uses_same_cache_entry(self):
-        """Compiling the same op twice must not create duplicate cache entries."""
+        """Compiling the same op twice must not create duplicate cache entries.
+
+        Deliberately does not patch spyre_kernel_cache: it relies on the default
+        being on, so a first entry is actually written and the second compile has
+        something to collide with. With caching off both counts would be 0 and the
+        assertion would hold vacuously -- so pair a default flip with an explicit
+        patch here.
+        """
         with fresh_cache():
             torch._dynamo.reset()
             x = _make_input()
@@ -294,6 +302,133 @@ class TestNoDiskIOOnCacheHit(unittest.TestCase):
                 torch.compile(_simple_fn)(_make_input())
 
             mock_gen.assert_not_called()
+
+
+def _populate_compile_dir(compile_dir: str) -> None:
+    """Write the minimal artifact set that makes a dir a valid cache entry."""
+    os.makedirs(os.path.join(compile_dir, "spyreCodeDir"), exist_ok=True)
+    for name in ["bundle.mlir", "sdsc_0.json"]:
+        with open(os.path.join(compile_dir, name), "w") as f:
+            f.write("content")
+    for name in ["init_binary.bin", "spyrecode.json"]:
+        with open(os.path.join(compile_dir, "spyreCodeDir", name), "wb") as f:
+            f.write(b"content")
+
+
+class TestMoveToFailedDir(unittest.TestCase):
+    """A failed compile must be retained under failed/ for manual debugging."""
+
+    def test_failed_dir_is_moved_and_contents_preserved(self):
+        """The dir must leave the cache root and keep its artifacts intact."""
+        with fresh_cache():
+            cache_root = get_cache_root_dir()
+            tmp_dir = allocate_compile_dir("d" + "a" * 63)
+            _populate_compile_dir(tmp_dir)
+
+            _move_to_failed_dir(tmp_dir)
+
+            self.assertFalse(
+                os.path.exists(tmp_dir), "Failed compile dir must not stay in place"
+            )
+            dest = os.path.join(cache_root, _FAILED_DIR_NAME, os.path.basename(tmp_dir))
+            self.assertTrue(os.path.isdir(dest), f"Expected failed dir at {dest}")
+            self.assertTrue(
+                os.path.isfile(os.path.join(dest, "bundle.mlir")),
+                "Artifacts must survive the move so dxp_standalone -d can rerun",
+            )
+
+    def test_failed_dirs_do_not_collide(self):
+        """Two failures for the same key must not overwrite each other."""
+        with fresh_cache():
+            cache_root = get_cache_root_dir()
+            key = "d" + "b" * 63
+
+            for _ in range(2):
+                tmp_dir = allocate_compile_dir(key)
+                _populate_compile_dir(tmp_dir)
+                _move_to_failed_dir(tmp_dir)
+
+            failed_root = os.path.join(cache_root, _FAILED_DIR_NAME)
+            self.assertEqual(
+                len(os.listdir(failed_root)),
+                2,
+                "Each failure must be retained under its own unique name",
+            )
+
+    def test_move_failure_is_not_fatal(self):
+        """A rename failure must be logged, not raised — the compile error wins.
+
+        _move_to_failed_dir runs inside an ``except`` block that re-raises the
+        original compilation failure; masking it with an OSError from the move
+        would lose the useful diagnostic.
+        """
+        from unittest.mock import patch
+
+        with fresh_cache():
+            tmp_dir = allocate_compile_dir("d" + "c" * 63)
+            _populate_compile_dir(tmp_dir)
+
+            with patch("os.rename", side_effect=OSError("cross-device link")):
+                _move_to_failed_dir(tmp_dir)  # must not raise
+
+            self.assertTrue(
+                os.path.isdir(tmp_dir),
+                "A failed move must leave the original dir for debugging",
+            )
+
+
+class TestCommitCompileDir(unittest.TestCase):
+    """commit_compile_dir must distinguish a lost race from a real I/O error."""
+
+    def test_existing_destination_discards_temp_and_returns_winner(self):
+        """Losing the race must reuse the winner's entry, not fail."""
+        with fresh_cache():
+            key = "e" + "a" * 63
+
+            winner = allocate_compile_dir(key)
+            _populate_compile_dir(winner)
+            cached_dir = commit_compile_dir(winner, key)
+
+            loser = allocate_compile_dir(key)
+            _populate_compile_dir(loser)
+            result = commit_compile_dir(loser, key)
+
+            self.assertEqual(result, cached_dir, "Must return the committed entry")
+            self.assertFalse(
+                os.path.exists(loser), "The losing temp dir must be discarded"
+            )
+            self.assertIsNotNone(get_cached_kernel_dir(key))
+
+    def test_rename_error_without_destination_is_raised(self):
+        """A non-race OSError must propagate instead of being called a race.
+
+        Returning cached_dir here would hand the caller a path that does not
+        exist, turning a full disk into a confusing missing-artifact error much
+        later in the compile.
+        """
+        from unittest.mock import patch
+
+        with fresh_cache():
+            key = "e" + "b" * 63
+            tmp_dir = allocate_compile_dir(key)
+            _populate_compile_dir(tmp_dir)
+
+            with patch("os.rename", side_effect=OSError(28, "No space left on device")):
+                with self.assertRaises(OSError):
+                    commit_compile_dir(tmp_dir, key)
+
+
+class TestCacheEnabledByDefault(unittest.TestCase):
+    def test_kernel_cache_is_on_by_default(self):
+        """The cache must be enabled without any env var being set.
+
+        Several tests in this file rely on the default being on rather than
+        patching it, so this pins the default itself.
+        """
+        self.assertTrue(
+            spyre_config.spyre_kernel_cache,
+            "spyre_kernel_cache must default to True (SPYRE_KERNEL_CACHE=0 opts out)",
+        )
 
 
 if __name__ == "__main__":
