@@ -22,38 +22,15 @@ Each test class covers one category from the Hash Coverage Table:
   TestIterationSpaceHashed     — different iter-space sizes → different hash
   TestOpFuncHashed             — different op names → different hash
   TestDebugHandleStripped      — debug_handle_ is stripped before hashing
+  TestVersionStringsHashed     — torch / torch_spyre / dxp versions change hash
+  TestBundleConfigHashed       — config that only generate_bundle sees changes hash
 """
 
 import json
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from sympy import Symbol, Integer
-
-
-def _make_tensor_arg(
-    is_input: bool,
-    arg_index: int,
-    size: int = 64,
-    hbm_addr: int | None = None,
-):
-    """Return a minimal TensorArg-like namespace."""
-    from torch_spyre._C import DataFormats, ElementArrangement
-
-    if hbm_addr is None:
-        hbm_addr = arg_index
-
-    ta = MagicMock()
-    ta.is_input = is_input
-    ta.arg_index = arg_index
-    ta.device_dtype = DataFormats.IEEE_FP16
-    ta.device_size = [1, size, 1]  # [outer, stick_dim, stick]
-    ta.device_coordinates = [Integer(0), Symbol("c0") % size, Integer(0)]
-    ta.allocation = {"hbm": hbm_addr}
-    ta.device_tile_advance_expr = None
-    ta.element_arrangement = ElementArrangement.STANDARD
-    ta.work_division = None
-    return ta
 
 
 def _make_op_spec(
@@ -296,11 +273,11 @@ class TestAffineStridesHashed(unittest.TestCase):
         op_stride_128 = self._make_tiled_op_spec(tile_stride_bytes=128)
         op_stride_256 = self._make_tiled_op_spec(tile_stride_bytes=256)
 
-        try:
-            h128 = _hash([op_stride_128])
-            h256 = _hash([op_stride_256])
-        except Exception as e:
-            self.skipTest(f"Skipping affine_strides test — compile_op_spec raised: {e}")
+        # Deliberately unguarded: this is the only test in the class, so
+        # swallowing a compile_op_spec failure into skipTest would silently
+        # drop all affine_strides coverage while the suite still reports green.
+        h128 = _hash([op_stride_128])
+        h256 = _hash([op_stride_256])
 
         self.assertNotEqual(
             h128,
@@ -444,6 +421,78 @@ class TestVersionStringsHashed(unittest.TestCase):
         h1 = self._hash_with_versions("1.0.0", "0.0.1")
         h2 = self._hash_with_versions("1.0.0", "0.0.1")
         self.assertEqual(h1, h2, "Same versions must produce the same hash.")
+
+
+# Config that generate_bundle reads but that never reaches the OpSpec tree
+class TestBundleConfigHashed(unittest.TestCase):
+    """Config settings invisible to the OpSpecs must still change the hash.
+
+    Unlike SENCORES / LX_PLANNING / HBM_POOL_PLANNING / LAYOUT_SOLVER — which
+    reach the key by having already mutated the OpSpec tree before hashing —
+    these two are read directly by generate_bundle() and leave no trace in the
+    hashed sdsc_N.json.  They must therefore be hashed explicitly, or two
+    genuinely different bundles would share a cache entry.
+    """
+
+    def _hash_with_config(
+        self, use_symbols: bool = False, frontend_pool_allocation: bool = False
+    ):
+        from torch_spyre.execution.kernel_cache import compute_specs_hash
+
+        op = _make_op_spec()
+        with (
+            patch(
+                "torch_spyre.execution.kernel_cache._get_dxp_version",
+                return_value="test-dxp-1.0",
+            ),
+            patch(
+                "torch_spyre.execution.kernel_cache._get_torch_spyre_version",
+                return_value="test-spyre-0.0",
+            ),
+            patch("torch_spyre._inductor.config.bundle_symbolic_args", use_symbols),
+            patch(
+                "torch_spyre._inductor.config.frontend_pool_allocation",
+                frontend_pool_allocation,
+            ),
+        ):
+            return compute_specs_hash([op], kernel_name="cfg_test")
+
+    def test_frontend_pool_allocation_changes_hash(self):
+        """%pool as an input_arg parameter vs device_mem_allocate must differ.
+
+        frontend_pool_allocation changes the bundle's function signature without
+        changing a single OpSpec, so nothing else in the key can distinguish it.
+        """
+        h_off = self._hash_with_config(frontend_pool_allocation=False)
+        h_on = self._hash_with_config(frontend_pool_allocation=True)
+        self.assertNotEqual(
+            h_off,
+            h_on,
+            "frontend_pool_allocation changes the emitted bundle.mlir function "
+            "signature and must produce a different cache key.",
+        )
+
+    def test_bundle_symbolic_args_changes_hash(self):
+        """use_symbols must be an explicit ingredient, not just a gate.
+
+        It gates whether the pool/slice/derived symbol tags are appended, so for
+        an OpSpec carrying none of those symbols the two modes would otherwise
+        hash identically.  This op has no such symbols, which is exactly the
+        case that needs the explicit discriminator.
+        """
+        h_off = self._hash_with_config(use_symbols=False)
+        h_on = self._hash_with_config(use_symbols=True)
+        self.assertNotEqual(
+            h_off,
+            h_on,
+            "bundle_symbolic_args must be hashed explicitly, so that specs with "
+            "no pool/slice/derived symbols still get distinct keys per mode.",
+        )
+
+    def test_same_config_same_hash(self):
+        h1 = self._hash_with_config()
+        h2 = self._hash_with_config()
+        self.assertEqual(h1, h2, "Same config must produce the same hash.")
 
 
 if __name__ == "__main__":

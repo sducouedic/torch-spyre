@@ -364,6 +364,31 @@ def compute_specs_hash(
     # sdscbundle.device_mem_allocate <pool_size> bytes in bundle.mlir.
     content_parts.append(f"pool_size:{pool_size}".encode())
 
+    # Two config settings that generate_bundle() reads but that are NOT visible
+    # in the OpSpec tree, and so must be hashed explicitly.
+    #
+    # Everything else that influences compiled output -- SENCORES, LX_PLANNING,
+    # HBM_POOL_PLANNING, LAYOUT_SOLVER, the tensor layouts -- reaches the key
+    # already, because it has mutated the OpSpec/LoopSpec tree (iteration space,
+    # allocations, device coordinates, pool offsets) before compute_specs_hash
+    # runs. Hashing those env vars on top would only add false misses. The
+    # invariant this key rests on is that the OpSpec tree, plus the values below,
+    # fully describe the artifact that dxp_standalone produces.
+    #
+    #   bundle_symbolic_args gates whether the pool/slice/derived symbol tags
+    #   above are appended at all, so a graph with no such symbols would hash
+    #   identically in both modes. generate_bundle() currently rejects
+    #   bundle_symbolic_args=False outright, so this is defence in depth.
+    #
+    #   frontend_pool_allocation changes the bundle's function signature:
+    #   %pool becomes a %pool_base_addr input_arg parameter instead of an
+    #   sdscbundle.device_mem_allocate statement. Same OpSpecs, different
+    #   bundle.mlir, so it must not share a cache entry.
+    content_parts.append(f"use_symbols:{use_symbols}".encode())
+    content_parts.append(
+        f"frontend_pool_allocation:{_spyre_config.frontend_pool_allocation}".encode()
+    )
+
     content = b"||".join(content_parts)
     extra = "||".join(
         [
