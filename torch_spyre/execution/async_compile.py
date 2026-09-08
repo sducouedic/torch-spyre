@@ -192,6 +192,11 @@ class SpyreAsyncCompile(AsyncCompile):
                     specs, kernel_name=kernel_name, pool_size=pool_size
                 )
             except RuntimeError as e:
+                # Fall through to the no-cache path below. Assigning use_cache
+                # here is what makes that explicit: the fall-through would
+                # otherwise depend on this except block happening to be the last
+                # statement in the `if use_cache:` body.
+                use_cache = False
                 logger.warning(
                     "Kernel cache disabled for %s: could not compute cache key: %s. "
                     "Set SPYRE_KERNEL_CACHE=0 to suppress this warning.",
@@ -222,9 +227,12 @@ class SpyreAsyncCompile(AsyncCompile):
                     return SpyreSDSCKernelRunner(
                         kernel_name, cached_dir, kernel_provenance=kernel_provenance
                     )
-                except Exception:  # subprocess.CalledProcessError:
-                    # Move the failed dir to failed/ for manual debugging
-                    # rather than leaving .tmp. dirs accumulating in the root.
+                except Exception:
+                    # Deliberately broad: generate_bundle can raise AssertionError
+                    # and dxp_standalone CalledProcessError, and every failure mode
+                    # should leave the artifacts under failed/ so the compile can be
+                    # reproduced with `dxp_standalone -d <path>`. Re-raised
+                    # unchanged; this only relocates the directory.
                     _move_to_failed_dir(compile_dir)
                     raise
 

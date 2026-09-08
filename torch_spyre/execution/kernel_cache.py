@@ -1,4 +1,4 @@
-# Copyright 2025 The Torch-Spyre Authors.
+# Copyright 2026 The Torch-Spyre Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,13 +37,18 @@ _REQUIRED_ARTIFACTS = [
     os.path.join("spyreCodeDir", "spyrecode.json"),
 ]
 
+# Cache-root naming convention. These are written by allocate_compile_dir and
+# _move_to_failed_dir and matched back by get_cache_stats, so they live here to
+# keep the producing and consuming ends from drifting apart.
+_TMP_DIR_MARKER = ".tmp."
+_FAILED_DIR_NAME = "failed"
+
 
 # ---------------------------------------------------------------------------
 # Per-process kernel hash registry — maps cache_key to debug metadata.
-# Populated by compute_specs_hash(). Hit/miss wiring (record_hit/record_miss)
-# is deferred to a follow-up PR; saving the registry summary to disk will land
-# alongside that wiring. Access via get_kernel_registry() for read, or
-# directly for tests.
+# Populated by compute_specs_hash(); hit/miss counters are recorded by
+# async_compile.sdsc(). Access via get_kernel_registry() for read, or directly
+# for tests. Persisting the summary to disk is left to a follow-up.
 # ---------------------------------------------------------------------------
 
 
@@ -479,7 +484,9 @@ def allocate_compile_dir(cache_key: str) -> str:
     in commit_compile_dir is atomic on POSIX.
     """
     cache_root = get_cache_root_dir()
-    tmp_dir = os.path.join(cache_root, f"{cache_key}.tmp.{uuid.uuid4().hex}")
+    tmp_dir = os.path.join(
+        cache_root, f"{cache_key}{_TMP_DIR_MARKER}{uuid.uuid4().hex}"
+    )
     os.makedirs(tmp_dir, exist_ok=True)
     return tmp_dir
 
@@ -502,9 +509,26 @@ def commit_compile_dir(tmp_dir: str, cache_key: str) -> str:
     try:
         os.rename(tmp_dir, cached_dir)  # Atomic on POSIX (same filesystem)
         logger.info("Saved compiled kernel to cache: %s", cached_dir)
-    except OSError:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.info("Cache race resolved: reusing existing entry at %s", cached_dir)
+    except OSError as exc:
+        # The isdir() check above is only a fast path -- the rename is the real
+        # atomic operation, and another process can commit in between. Whether
+        # this was that race is decided by looking again: if the destination is
+        # now a valid directory, someone won and their entry is usable.
+        if os.path.isdir(cached_dir):
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            logger.info("Cache race resolved: reusing existing entry at %s", cached_dir)
+            return cached_dir
+        # Not a race: ENOSPC, EXDEV, EACCES and friends land here. Returning
+        # cached_dir would hand the caller a path that does not exist, surfacing
+        # a full disk as a confusing missing-artifact error much later on.
+        logger.warning(
+            "Failed to commit compiled kernel to cache at %s: %s. Leaving compile "
+            "dir at %s.",
+            cached_dir,
+            exc,
+            tmp_dir,
+        )
+        raise
 
     return cached_dir
 
@@ -517,7 +541,7 @@ def _move_to_failed_dir(compile_dir: str) -> None:
     fails (e.g. cross-device move), the original path is kept and logged.
     """
     cache_root = get_cache_root_dir()
-    failed_root = os.path.join(cache_root, "failed")
+    failed_root = os.path.join(cache_root, _FAILED_DIR_NAME)
     try:
         os.makedirs(failed_root, exist_ok=True)
         dest = os.path.join(failed_root, os.path.basename(compile_dir))
@@ -536,18 +560,15 @@ def get_cache_stats() -> dict:
     Only counts and sizes committed kernel directories (not in-progress
     ``.tmp.`` dirs and not the ``failed/`` directory).
     """
+    # get_cache_root_dir() creates the root, so it always exists from here on.
     cache_root = get_cache_root_dir()
-
-    if not os.path.exists(cache_root):
-        return {"total_cached_kernels": 0, "cache_size_mb": 0.0}
 
     cached_dirs = [
         d
         for d in os.listdir(cache_root)
         if os.path.isdir(os.path.join(cache_root, d))
-        and not d.endswith(".tmp")
-        and ".tmp." not in d
-        and d != "failed"
+        and _TMP_DIR_MARKER not in d
+        and d != _FAILED_DIR_NAME
     ]
 
     # Walk only the committed kernel dirs so that in-progress .tmp. dirs and
