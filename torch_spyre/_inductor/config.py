@@ -196,12 +196,16 @@ native_layout_packer: bool = _get_env_bool("TORCH_SPYRE_NATIVE_PACKER", True)
 
 # When symbolic cost_expr fails, use the fallback cost instead of erroring out
 _cpsat_warn_on_cost_expr: bool = True
-# Enable persistent on-disk caching of compiled Spyre kernels across
-# invocations.
-# Set SPYRE_KERNEL_CACHE=0 to disable.
-# To force recompilation (bypass lookup but still save), use the standard
+# Persistent on-disk caching of compiled Spyre kernels across invocations,
+# enabled by default: a cache hit skips both generate_bundle and dxp_standalone,
+# which dominates compile time for a whole model.
+# Set SPYRE_KERNEL_CACHE=0 (or false/no) to opt out.
+# To bypass the cache entirely -- neither read nor written -- use the standard
 # PyTorch flag: TORCHINDUCTOR_FORCE_DISABLE_CACHES=1 / set
 # torch._inductor.config.force_disable_caches = True.
-spyre_kernel_cache: bool = os.environ.get("SPYRE_KERNEL_CACHE", "0") == "1"
+# The cache key covers the OpSpec tree plus the compiler and torch-spyre
+# versions; see compute_specs_hash in execution/kernel_cache.py for what makes
+# an entry distinct.
+spyre_kernel_cache: bool = _get_env_bool("SPYRE_KERNEL_CACHE", True)
 
 install_config_module(sys.modules[__name__])
