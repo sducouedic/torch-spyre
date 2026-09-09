@@ -243,6 +243,16 @@ class TestClearCache(unittest.TestCase):
 
 
 class TestAtomicCommit(unittest.TestCase):
+    """Concurrent commits of one key must converge on a single valid entry.
+
+    Scope note: this exercises threads in one process against whatever
+    filesystem ``fresh_cache()`` lands on, i.e. a local one in CI. The
+    atomicity ``commit_compile_dir`` relies on is ``os.rename``, which POSIX
+    guarantees only within a single filesystem; on NFS and other network
+    filesystems it is not guaranteed, so a green run here does not certify a
+    shared network cache directory.
+    """
+
     def test_concurrent_commit_same_key_does_not_corrupt(self):
         """Four threads compiling the same key concurrently must leave exactly one valid entry."""
         import threading
@@ -416,6 +426,77 @@ class TestCommitCompileDir(unittest.TestCase):
             with patch("os.rename", side_effect=OSError(28, "No space left on device")):
                 with self.assertRaises(OSError):
                     commit_compile_dir(tmp_dir, key)
+
+
+class TestCacheKeyFailureWarnsOnce(unittest.TestCase):
+    """An uncomputable cache key must warn once per compiler, not once per kernel.
+
+    The cause is environmental (a missing LIB_VERSION_FILE, say), so it recurs
+    for every kernel in the graph. With the cache on by default that would be
+    hundreds of identical warnings for a whole model.
+    """
+
+    def _run_sdsc_with_unusable_key(self, kernel_count):
+        """Drive sdsc() kernel_count times with compute_specs_hash always failing.
+
+        Returns (warning_count, debug_count). generate_bundle and dxp_standalone
+        are stubbed out: this exercises only the key-failure branch, so no real
+        compilation is needed.
+        """
+        from unittest.mock import patch, MagicMock
+
+        from torch_spyre.execution.async_compile import SpyreAsyncCompile
+
+        compiler = SpyreAsyncCompile()
+        # One OpSpec-free spec list is enough; find_unimplemented returns None
+        # for it and the key computation fails before specs are ever inspected.
+        specs = []
+
+        with (
+            patch(
+                "torch_spyre.execution.async_compile.compute_specs_hash",
+                side_effect=RuntimeError("LIB_VERSION_FILE is not set"),
+            ),
+            patch(
+                "torch_spyre.execution.async_compile._compile_to_dir"
+            ) as compile_to_dir,
+            patch(
+                "torch_spyre.execution.async_compile.SpyreSDSCKernelRunner",
+                MagicMock(),
+            ),
+            patch("torch_spyre.execution.async_compile.logger") as mock_logger,
+            spyre_config.patch({"spyre_kernel_cache": True}),
+        ):
+            for i in range(kernel_count):
+                compiler.sdsc(f"kernel_{i}", specs)
+
+            # Every kernel must still be compiled -- degrading to the no-cache
+            # path is the whole point of the fall-through.
+            self.assertEqual(compile_to_dir.call_count, kernel_count)
+
+            key_warnings = [
+                c
+                for c in mock_logger.warning.call_args_list
+                if "could not compute cache key" in str(c)
+            ]
+            key_debugs = [
+                c
+                for c in mock_logger.debug.call_args_list
+                if "could not compute cache key" in str(c)
+            ]
+            return len(key_warnings), len(key_debugs)
+
+    def test_first_failure_warns(self):
+        warnings, debugs = self._run_sdsc_with_unusable_key(1)
+        self.assertEqual(warnings, 1, "The first failure must warn")
+        self.assertEqual(debugs, 0)
+
+    def test_subsequent_failures_are_demoted_to_debug(self):
+        warnings, debugs = self._run_sdsc_with_unusable_key(5)
+        self.assertEqual(warnings, 1, "Only the first of five failures may warn")
+        self.assertEqual(
+            debugs, 4, "The remaining failures must still be logged, at debug level"
+        )
 
 
 class TestCacheEnabledByDefault(unittest.TestCase):

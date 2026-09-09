@@ -22,6 +22,44 @@ import shared_config
 from oot_framework.oot_test_utilities import _RUNTIME_TAGS, _RUNTIME_SHAPES
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _isolate_spyre_kernel_cache(tmp_path_factory):
+    """Point the Spyre kernel cache at a throwaway root for the whole session.
+
+    Now that ``spyre_kernel_cache`` defaults on, an unisolated suite writes into
+    the developer's (or CI runner's) real cache root, and two things go wrong.
+
+    The suite *poisons* that cache. Many tests mock ``subprocess.run`` to avoid
+    invoking ``dxp_standalone``, but ``generate_bundle`` has already written
+    ``bundle.mlir`` in-process; the compile therefore "succeeds" with no
+    ``spyreCodeDir/`` and ``commit_compile_dir`` promotes that half-built
+    directory to ``<cache_root>/<key>/``. It fails the ``_REQUIRED_ARTIFACTS``
+    check forever after, so a later real run recompiles, loses the
+    already-exists race in ``commit_compile_dir``, discards its own good
+    artifacts and is handed the broken entry back.
+
+    And the cache perturbs the *suite*: a test asserting on compilation
+    behaviour silently exercises the cache-hit path instead, depending on what
+    an earlier test or an earlier session happened to leave behind, making
+    results order- and history-dependent.
+
+    Redirecting ``TORCHINDUCTOR_CACHE_DIR`` (which ``cache_dir()`` and hence
+    ``get_cache_root_dir()`` read) keeps the cache path exercised as in
+    production while confining every write to a per-session tmpdir. Individual
+    tests needing finer control still use ``fresh_cache()`` per test.
+    """
+    cache_root = tmp_path_factory.mktemp("torchinductor_spyre_tests")
+    prev = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+    os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(cache_root)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("TORCHINDUCTOR_CACHE_DIR", None)
+        else:
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = prev
+
+
 # Cap on the failure message folded into wasxfail (see _extract_failure_message):
 # keeps the terminal short-summary line and JUnit XML message attribute readable.
 _MAX_XFAIL_REASON_LEN = 300

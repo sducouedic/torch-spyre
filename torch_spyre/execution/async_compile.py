@@ -130,6 +130,10 @@ class SpyreAsyncCompile(AsyncCompile):
         super().__init__()
         self._provenance_attempt_count = 0
         self._provenance_failure_count = 0
+        # Latched for the lifetime of this compiler, not reset per graph like
+        # the provenance counters: a cache key that cannot be computed stays
+        # uncomputable, so re-warning on the next graph adds nothing.
+        self._cache_key_warning_emitted = False
 
     def triton(self, *args, **kwargs):
         raise NotImplementedError(
@@ -197,12 +201,26 @@ class SpyreAsyncCompile(AsyncCompile):
                 # otherwise depend on this except block happening to be the last
                 # statement in the `if use_cache:` body.
                 use_cache = False
-                logger.warning(
-                    "Kernel cache disabled for %s: could not compute cache key: %s. "
-                    "Set SPYRE_KERNEL_CACHE=0 to suppress this warning.",
-                    kernel_name,
-                    e,
-                )
+                # Once per process, not once per kernel. The cause is a property
+                # of the environment (a missing LIB_VERSION_FILE, say), so it
+                # holds for every kernel in the graph; with the cache on by
+                # default that is one identical warning per kernel -- hundreds
+                # for a whole model -- burying whatever else is on stderr.
+                if not self._cache_key_warning_emitted:
+                    self._cache_key_warning_emitted = True
+                    logger.warning(
+                        "Kernel cache disabled: could not compute cache key for "
+                        "%s: %s. Set SPYRE_KERNEL_CACHE=0 to suppress this "
+                        "warning. Further occurrences are logged at debug level.",
+                        kernel_name,
+                        e,
+                    )
+                else:
+                    logger.debug(
+                        "Kernel cache disabled for %s: could not compute cache key: %s",
+                        kernel_name,
+                        e,
+                    )
             else:
                 logger.debug("Bundle cache key: %s", cache_key)
 

@@ -239,6 +239,10 @@ _cpsat_warn_on_cost_expr: bool = True
 # The cache key covers the OpSpec tree plus the compiler and torch-spyre
 # versions; see compute_specs_hash in execution/kernel_cache.py for what makes
 # an entry distinct.
-spyre_kernel_cache: bool = _get_env_bool("SPYRE_KERNEL_CACHE", True)
+spyre_kernel_cache: bool = os.getenv("SPYRE_KERNEL_CACHE", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 install_config_module(sys.modules[__name__])
