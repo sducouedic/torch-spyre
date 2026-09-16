@@ -1341,6 +1341,9 @@ def generate_sdsc(
             extra["allocateNode_"] = alloc_node
         return extra
 
+    active_core_ids = sdsc_spec.completed_producer_cores or tuple(
+        range(sdsc_spec.num_cores)
+    )
     return (
         {
             f"{idx}_{sdsc_spec.opfunc}": {
@@ -1360,8 +1363,8 @@ def generate_sdsc(
                 },
                 "coreFoldProp_": {"factor_": sdsc_spec.num_cores, "label_": "core"},
                 "coreletFoldProp_": {"factor_": 1, "label_": "corelet"},
-                "numCoresUsed_": sdsc_spec.num_cores,
-                "coreIdToDsc_": {str(c): 0 for c in range(sdsc_spec.num_cores)},
+                "numCoresUsed_": len(active_core_ids),
+                "coreIdToDsc_": {str(c): 0 for c in active_core_ids},
                 # The top-level map is the operation schedule. Each shuffle
                 # tensor's physical owners are carried separately on its
                 # allocation coordinates below.
@@ -1371,14 +1374,14 @@ def generate_sdsc(
                 },
                 "coreIdToWkSlice_": core_id_to_wk_slice,
                 "coreIdToDscSchedule": {
-                    str(c): [[-1, 0, 0, 0]] for c in range(sdsc_spec.num_cores)
+                    str(c): [[-1, 0, 0, 0]] for c in active_core_ids
                 },
                 "dscs_": [
                     {
                         sdsc_spec.opfunc: {
-                            "numCoresUsed_": sdsc_spec.num_cores,
+                            "numCoresUsed_": len(active_core_ids),
                             "numCoreletsUsed_": 1,
-                            "coreIdsUsed_": [c for c in range(sdsc_spec.num_cores)],
+                            "coreIdsUsed_": list(active_core_ids),
                             "N_": {
                                 "name_": "n",
                                 **{
@@ -1589,10 +1592,16 @@ def generate_sdsc(
                                             sdsc_spec.opfunc, tensor, i
                                         ),
                                         "coreIdToWkSlice_": (
-                                            tensor.work_division.to_core_slices(
-                                                tensor.work_division.num_cores
-                                                or sdsc_spec.num_cores
-                                            )
+                                            {
+                                                core: slices
+                                                for core, slices in tensor.work_division.to_core_slices(
+                                                    tensor.work_division.num_cores
+                                                    or sdsc_spec.num_cores
+                                                ).items()
+                                                if i != 0
+                                                or not sdsc_spec.completed_producer_cores
+                                                or int(core) in active_core_ids
+                                            }
                                             if sdsc_spec.opfunc == "shuffle"
                                             and tensor.work_division is not None
                                             else {}

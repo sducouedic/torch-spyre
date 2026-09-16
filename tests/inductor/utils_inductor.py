@@ -853,3 +853,4 @@ def assert_lx_only_relayout_payload(output_dirs):
     )
     labeled_ds = lx_ops[0]["labeledDs_"]
     assert labeled_ds and all(ds["hbmSize_"] == 0 for ds in labeled_ds)
+    return lx_ops[0]["op"]["prodConsList"]
