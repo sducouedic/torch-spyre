@@ -447,39 +447,39 @@ def get_cached_kernel_dir(cache_key: str) -> Optional[str]:
     return cached_dir
 
 
-# Subdirectory holding one empty marker file per kernel name that hashed to a
-# cache entry. Cache dirs are named by hash only, so this is the only way to
-# tell from the filesystem which kernel a cached entry belongs to.
-_KERNEL_NAME_DIR = "kernel_name"
+# Lists the kernel names that hashed to a cache entry, one per line. Cache
+# dirs are named by hash only, so this is the only way to tell from the
+# filesystem which kernel a cached entry belongs to.
+_KERNEL_NAME_FILE = "kernel_name.txt"
 
 
 def write_kernel_name_marker(kernel_dir: str, kernel_name: str) -> None:
-    """Create ``<kernel_dir>/kernel_name/<kernel_name>`` as an empty marker file.
+    """Append ``kernel_name`` to ``<kernel_dir>/kernel_name.txt`` if absent.
 
-    Best-effort: a read-only or already-populated cache dir must never fail a
-    compile. Several kernel names can hash to the same key, so markers
+    One name per line. Several kernel names can hash to the same key, so names
     accumulate rather than replace each other.
+
+    Best-effort: a read-only or unwritable cache dir must never fail a compile.
     """
     if not kernel_name:
         return
-    # Kernel names come from Inductor and are plain identifiers, but never let
-    # one escape its cache dir.
-    safe_name = os.path.basename(kernel_name)
-    if not safe_name or safe_name in (".", ".."):
+    # A newline would corrupt the one-name-per-line format.
+    name = kernel_name.strip()
+    if not name or "\n" in name or "\r" in name:
         return
+    marker = os.path.join(kernel_dir, _KERNEL_NAME_FILE)
     try:
-        marker_dir = os.path.join(kernel_dir, _KERNEL_NAME_DIR)
-        os.makedirs(marker_dir, exist_ok=True)
-        marker = os.path.join(marker_dir, safe_name)
-        if not os.path.exists(marker):
-            with open(marker, "w"):
-                pass
+        try:
+            with open(marker) as f:
+                if name in f.read().splitlines():
+                    return
+        except FileNotFoundError:
+            pass
+        with open(marker, "a") as f:
+            f.write(f"{name}\n")
     except OSError as e:
         logger.debug(
-            "Could not write kernel_name marker for %s in %s: %s",
-            kernel_name,
-            kernel_dir,
-            e,
+            "Could not record kernel name %s in %s: %s", name, kernel_dir, e
         )
 
 
@@ -489,8 +489,8 @@ def allocate_compile_dir(cache_key: str, kernel_name: str = "") -> str:
     Placing it inside the cache root (not /tmp) ensures the subsequent rename
     in commit_compile_dir is atomic on POSIX.
 
-    ``kernel_name``, when given, is recorded as a marker file so the committed
-    cache entry can be traced back to its kernel.
+    ``kernel_name``, when given, is recorded in kernel_name.txt so the
+    committed cache entry can be traced back to its kernel.
     """
     cache_root = get_cache_root_dir()
     tmp_dir = os.path.join(cache_root, f"{cache_key}.tmp.{uuid.uuid4().hex}")
