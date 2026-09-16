@@ -248,4 +248,9 @@ _cpsat_warn_on_cost_expr: bool = True
 # torch._inductor.config.force_disable_caches = True.
 spyre_kernel_cache: bool = os.environ.get("SPYRE_KERNEL_CACHE", "0") == "1"
 
+# Root directory of the persistent kernel cache. Empty means the default
+# location under the Inductor cache dir; set SPYRE_KERNEL_CACHE_DIR to point
+# elsewhere, e.g. a shared volume.
+spyre_kernel_cache_dir: str = os.environ.get("SPYRE_KERNEL_CACHE_DIR", "")
+
 install_config_module(sys.modules[__name__])
