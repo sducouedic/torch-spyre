@@ -295,8 +295,6 @@ class SpyreAsyncCompile(AsyncCompile):
                 if cached_dir is not None:
                     logger.debug("Cache HIT: Using cached kernel from: %s", cached_dir)
                     get_kernel_registry().record_hit(cache_key)
-                    # Entries committed before this marker existed, or hit by a
-                    # kernel name that did not compile them, still get named.
                     write_kernel_name_marker(cached_dir, kernel_name)
                     return SpyreSDSCKernelRunner(
                         kernel_name, cached_dir, kernel_provenance=kernel_provenance
