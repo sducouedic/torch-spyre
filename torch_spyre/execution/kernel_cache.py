@@ -447,15 +447,55 @@ def get_cached_kernel_dir(cache_key: str) -> Optional[str]:
     return cached_dir
 
 
-def allocate_compile_dir(cache_key: str) -> str:
+# Subdirectory holding one empty marker file per kernel name that hashed to a
+# cache entry. Cache dirs are named by hash only, so this is the only way to
+# tell from the filesystem which kernel a cached entry belongs to.
+_KERNEL_NAME_DIR = "kernel_name"
+
+
+def write_kernel_name_marker(kernel_dir: str, kernel_name: str) -> None:
+    """Create ``<kernel_dir>/kernel_name/<kernel_name>`` as an empty marker file.
+
+    Best-effort: a read-only or already-populated cache dir must never fail a
+    compile. Several kernel names can hash to the same key, so markers
+    accumulate rather than replace each other.
+    """
+    if not kernel_name:
+        return
+    # Kernel names come from Inductor and are plain identifiers, but never let
+    # one escape its cache dir.
+    safe_name = os.path.basename(kernel_name)
+    if not safe_name or safe_name in (".", ".."):
+        return
+    try:
+        marker_dir = os.path.join(kernel_dir, _KERNEL_NAME_DIR)
+        os.makedirs(marker_dir, exist_ok=True)
+        marker = os.path.join(marker_dir, safe_name)
+        if not os.path.exists(marker):
+            with open(marker, "w"):
+                pass
+    except OSError as e:
+        logger.debug(
+            "Could not write kernel_name marker for %s in %s: %s",
+            kernel_name,
+            kernel_dir,
+            e,
+        )
+
+
+def allocate_compile_dir(cache_key: str, kernel_name: str = "") -> str:
     """Reserve a unique temp directory inside the cache root for compilation.
 
     Placing it inside the cache root (not /tmp) ensures the subsequent rename
     in commit_compile_dir is atomic on POSIX.
+
+    ``kernel_name``, when given, is recorded as a marker file so the committed
+    cache entry can be traced back to its kernel.
     """
     cache_root = get_cache_root_dir()
     tmp_dir = os.path.join(cache_root, f"{cache_key}.tmp.{uuid.uuid4().hex}")
     os.makedirs(tmp_dir, exist_ok=True)
+    write_kernel_name_marker(tmp_dir, kernel_name)
     return tmp_dir
 
 
