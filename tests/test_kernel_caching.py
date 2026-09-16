@@ -28,6 +28,7 @@ Run with:
 import os
 import tempfile
 import unittest
+from unittest import mock
 import torch
 import torch_spyre  # noqa: F401 — side-effects: registers Spyre backend
 
@@ -318,12 +319,15 @@ class TestCacheRootDirOverride(unittest.TestCase):
 
     def test_override_expands_user(self):
         """A ~-prefixed override is expanded to the home directory."""
-        with spyre_config.patch({"spyre_kernel_cache_dir": "~/spyre-cache-xyz"}):
-            self.assertEqual(
-                get_cache_root_dir(),
-                os.path.join(os.path.expanduser("~"), "spyre-cache-xyz"),
-            )
-        os.rmdir(os.path.join(os.path.expanduser("~"), "spyre-cache-xyz"))
+        with tempfile.TemporaryDirectory() as fake_home:
+            with mock.patch.dict(os.environ, {"HOME": fake_home}):
+                with spyre_config.patch(
+                    {"spyre_kernel_cache_dir": "~/spyre-kernel-cache"}
+                ):
+                    self.assertEqual(
+                        get_cache_root_dir(),
+                        os.path.join(fake_home, "spyre-kernel-cache"),
+                    )
 
     def test_compiled_kernels_land_in_overridden_root(self):
         """Compilation must write its cache entries into the overridden root."""
@@ -341,9 +345,7 @@ class TestCacheRootDirOverride(unittest.TestCase):
                     "Expected kernels cached in the overridden root",
                 )
                 self.assertTrue(
-                    any(
-                        os.path.isdir(os.path.join(root, d)) for d in os.listdir(root)
-                    ),
+                    any(os.path.isdir(os.path.join(root, d)) for d in os.listdir(root)),
                     f"Expected cache entry directories under {root}",
                 )
 
