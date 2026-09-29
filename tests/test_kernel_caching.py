@@ -31,6 +31,7 @@ import torch
 import torch_spyre  # noqa: F401 — side-effects: registers Spyre backend
 
 import torch_spyre._inductor.config as spyre_config
+from torch._inductor.runtime.runtime_utils import cache_dir
 from torch._inductor.utils import fresh_cache
 
 from torch_spyre.execution.kernel_cache import (
@@ -297,6 +298,60 @@ class TestNoDiskIOOnCacheHit(unittest.TestCase):
                 torch.compile(_simple_fn)(_make_input())
 
             mock_gen.assert_not_called()
+
+
+class TestKernelNameRecorded(unittest.TestCase):
+    @staticmethod
+    def _recorded_kernel_names() -> list[str]:
+        """Names listed in every cache entry's kernel_name.txt."""
+        cache_root = get_cache_root_dir()
+        names = []
+        for entry in os.listdir(cache_root):
+            marker = os.path.join(cache_root, entry, "kernel_name.txt")
+            if os.path.isfile(marker):
+                with open(marker) as f:
+                    names.extend(f.read().splitlines())
+        return names
+
+    @staticmethod
+    def _uncached_kernel_names() -> list[str]:
+        """Kernel names embedded in the uncached output dirs.
+
+        Each dir is named f"{digest(8)}_{name}_" + mkdtemp's 8 random chars.
+        """
+        spyre_dir = os.path.join(cache_dir(), "inductor-spyre")
+        if not os.path.isdir(spyre_dir):
+            return []
+        return [entry[9:-9] for entry in os.listdir(spyre_dir)]
+
+    def test_recorded_name_matches_uncached_dir_name(self):
+        """kernel_name.txt must hold the name the uncached path puts in its dir."""
+        with fresh_cache(), spyre_config.patch({"spyre_kernel_cache": True}):
+            torch._dynamo.reset()
+            torch.compile(_simple_fn)(_make_input())
+            cached_names = self._recorded_kernel_names()
+
+        with fresh_cache(), spyre_config.patch({"spyre_kernel_cache": False}):
+            torch._dynamo.reset()
+            torch.compile(_simple_fn)(_make_input())
+            uncached_names = self._uncached_kernel_names()
+
+        self.assertGreater(len(cached_names), 0, "No kernel_name.txt recorded")
+        self.assertEqual(sorted(cached_names), sorted(uncached_names))
+
+    def test_cache_hit_does_not_duplicate_name(self):
+        """A cache hit on the same kernel must not list its name twice."""
+        with fresh_cache(), spyre_config.patch({"spyre_kernel_cache": True}):
+            torch._dynamo.reset()
+            torch.compile(_simple_fn)(_make_input())
+            first = self._recorded_kernel_names()
+
+            torch._dynamo.reset()
+            torch.compile(_simple_fn)(_make_input())
+            second = self._recorded_kernel_names()
+
+        self.assertGreater(len(first), 0, "No kernel_name.txt recorded")
+        self.assertEqual(sorted(first), sorted(second))
 
 
 if __name__ == "__main__":
