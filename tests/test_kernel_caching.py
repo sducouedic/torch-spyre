@@ -26,6 +26,7 @@ Run with:
 """
 
 import os
+import tempfile
 import unittest
 import torch
 import torch_spyre  # noqa: F401 — side-effects: registers Spyre backend
@@ -34,12 +35,15 @@ import torch_spyre._inductor.config as spyre_config
 from torch._inductor.runtime.runtime_utils import cache_dir
 from torch._inductor.utils import fresh_cache
 
+from torch_spyre.execution.async_compile import _safe_kernel_name
 from torch_spyre.execution.kernel_cache import (
+    _merge_kernel_names,
     allocate_compile_dir,
     commit_compile_dir,
     get_cache_root_dir,
     get_cache_stats,
     get_cached_kernel_dir,
+    record_kernel_name,
 )
 
 DEVICE = torch.device("spyre")
@@ -279,6 +283,21 @@ class TestAtomicCommit(unittest.TestCase):
                 result, "Expected a valid cache entry after concurrent commit"
             )
 
+    def test_race_loser_name_is_rescued(self):
+        """A name only the race loser recorded must survive in the winner's marker."""
+        fake_key = "d" + "b" * 63
+
+        with fresh_cache():
+            winner = allocate_compile_dir(fake_key, kernel_name="kernel_winner")
+            loser = allocate_compile_dir(fake_key, kernel_name="kernel_loser")
+
+            committed = commit_compile_dir(winner, fake_key)  # winner: rename
+            commit_compile_dir(loser, fake_key)  # loser: merge names, then discard
+
+            with open(os.path.join(committed, "kernel_name.txt")) as f:
+                names = f.read().splitlines()
+            self.assertEqual(sorted(names), ["kernel_loser", "kernel_winner"])
+
 
 class TestNoDiskIOOnCacheHit(unittest.TestCase):
     def test_generate_bundle_skipped_on_cache_hit(self):
@@ -337,7 +356,12 @@ class TestKernelNameRecorded(unittest.TestCase):
             uncached_names = self._uncached_kernel_names()
 
         self.assertGreater(len(cached_names), 0, "No kernel_name.txt recorded")
-        self.assertEqual(sorted(cached_names), sorted(uncached_names))
+        # The marker stores the full name; the uncached dir embeds the
+        # _safe_kernel_name-truncated form, so compare after truncation.
+        self.assertEqual(
+            sorted(_safe_kernel_name(n) for n in cached_names),
+            sorted(uncached_names),
+        )
 
     def test_cache_hit_does_not_duplicate_name(self):
         """A cache hit on the same kernel must not list its name twice."""
@@ -352,6 +376,88 @@ class TestKernelNameRecorded(unittest.TestCase):
 
         self.assertGreater(len(first), 0, "No kernel_name.txt recorded")
         self.assertEqual(sorted(first), sorted(second))
+
+
+class TestKernelNameRecordedNoDevice(unittest.TestCase):
+    """Device-free unit tests of record_kernel_name on a plain tmpdir."""
+
+    @staticmethod
+    def _lines(kernel_dir: str) -> list[str]:
+        with open(os.path.join(kernel_dir, "kernel_name.txt")) as f:
+            return f.read().splitlines()
+
+    def test_distinct_names_kept(self):
+        with tempfile.TemporaryDirectory() as d:
+            record_kernel_name(d, "kernel_a")
+            record_kernel_name(d, "kernel_b")
+            self.assertEqual(self._lines(d), ["kernel_a", "kernel_b"])
+
+    def test_same_name_deduped(self):
+        with tempfile.TemporaryDirectory() as d:
+            record_kernel_name(d, "kernel_a")
+            record_kernel_name(d, "kernel_a")
+            self.assertEqual(self._lines(d), ["kernel_a"])
+
+    def test_name_with_newline_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            record_kernel_name(d, "kernel_a\nkernel_b")
+            self.assertFalse(
+                os.path.exists(os.path.join(d, "kernel_name.txt")),
+                "A name containing a newline must not be recorded",
+            )
+
+    def test_empty_name_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            record_kernel_name(d, "")
+            self.assertFalse(os.path.exists(os.path.join(d, "kernel_name.txt")))
+
+    def test_missing_dir_does_not_raise(self):
+        # Recording into a nonexistent dir must be swallowed, not raised.
+        record_kernel_name("/nonexistent/dir/xyz", "kernel_a")
+
+
+class TestMergeKernelNames(unittest.TestCase):
+    """Unit tests of _merge_kernel_names, the race-loser name rescue."""
+
+    @staticmethod
+    def _lines(kernel_dir: str) -> list[str]:
+        with open(os.path.join(kernel_dir, "kernel_name.txt")) as f:
+            return f.read().splitlines()
+
+    def test_loser_only_name_rescued(self):
+        """A name only the loser recorded is merged into the winner."""
+        with tempfile.TemporaryDirectory() as root:
+            loser = os.path.join(root, "loser")
+            winner = os.path.join(root, "winner")
+            os.makedirs(loser)
+            os.makedirs(winner)
+            record_kernel_name(winner, "kernel_a")
+            record_kernel_name(loser, "kernel_b")
+            _merge_kernel_names(loser, winner)
+            self.assertEqual(self._lines(winner), ["kernel_a", "kernel_b"])
+
+    def test_merge_does_not_duplicate(self):
+        """A name in both files stays single-listed after merge."""
+        with tempfile.TemporaryDirectory() as root:
+            loser = os.path.join(root, "loser")
+            winner = os.path.join(root, "winner")
+            os.makedirs(loser)
+            os.makedirs(winner)
+            record_kernel_name(winner, "kernel_a")
+            record_kernel_name(loser, "kernel_a")
+            _merge_kernel_names(loser, winner)
+            self.assertEqual(self._lines(winner), ["kernel_a"])
+
+    def test_missing_loser_file_is_noop(self):
+        """A loser with no marker file merges nothing and does not raise."""
+        with tempfile.TemporaryDirectory() as root:
+            loser = os.path.join(root, "loser")
+            winner = os.path.join(root, "winner")
+            os.makedirs(loser)
+            os.makedirs(winner)
+            record_kernel_name(winner, "kernel_a")
+            _merge_kernel_names(loser, winner)
+            self.assertEqual(self._lines(winner), ["kernel_a"])
 
 
 if __name__ == "__main__":
