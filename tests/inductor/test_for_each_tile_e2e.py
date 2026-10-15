@@ -933,7 +933,10 @@ class TestPrescribedRegionsE2E(_DynamoResetTestCase):
     def _compile(self, fn, *args):
         _CollectRegions.operations = []
         _CollectRegions.regions = []
-        with patch.object(ts_passes, "CustomPreSchedulingPasses", _CollectRegions):
+        with (
+            patch.object(ts_passes, "CustomPreSchedulingPasses", _CollectRegions),
+            torch._inductor.config.patch(force_disable_caches=True),
+        ):
             torch.compile(fn, backend="inductor", fullgraph=True)(*args)
         return _CollectRegions.operations, _CollectRegions.regions
 
