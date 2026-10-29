@@ -87,6 +87,7 @@ from torch_spyre._inductor.scratchpad.plan_solver import (
     build_relayout_copy,
     relayout_copy_name,
 )
+from torch_spyre._inductor.scratchpad import plan_reuse
 from torch_spyre._inductor.scratchpad.greedy_solver import GreedyLayoutSolver
 from torch_spyre._inductor.scratchpad.firstfit_bestfit_solver import (
     BestFitLayoutSolver,
@@ -2986,6 +2987,21 @@ class CoOptimizingAllocator(ScratchpadAllocator):
         )
 
     def _solve(self, solver: MemoryPlanSolver, graph: GraphLowering) -> Sequence[Any]:
+        # A solve with the same solver input as an earlier one replays its plan
+        # (see plan_reuse.py).
+        key = plan_reuse.plan_key(solver, graph) if plan_reuse.enabled() else None
+        if key is not None:
+            reused = plan_reuse.lookup(key, solver.buffers)
+            if reused is not None:
+                return reused
+        result = self._solve_and_price(solver, graph)
+        if key is not None:
+            plan_reuse.store(key, result)
+        return result
+
+    def _solve_and_price(
+        self, solver: MemoryPlanSolver, graph: GraphLowering
+    ) -> Sequence[Any]:
         assert isinstance(solver, CoreDivisionLayoutSolver)
         bufmap = {buf.name: buf for buf in solver.buffers}
         # Built once here, not per op inside the loop below: every op's residency

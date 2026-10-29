@@ -406,6 +406,14 @@ auto_coarse_tiling: bool = os.environ.get("AUTO_COARSE_TILING", "0") == "1"
 
 # When symbolic cost_expr fails, use the fallback cost instead of erroring out
 _cpsat_warn_on_cost_expr: bool = True
+
+# Reuse a joint scratchpad plan for a later solve whose solver input is the same,
+# within one process (scratchpad/plan_reuse.py). The buckets of a for_each_tile
+# kernel differ only in the loop trip count, which the solver input does not
+# carry, so after the first bucket the others skip the cost model and the CP-SAT
+# solve. The replayed plan is optimal for the first bucket's objective.
+# Off by default; set SPYRE_SCRATCHPAD_PLAN_REUSE=1 to enable.
+scratchpad_plan_reuse: bool = os.environ.get("SPYRE_SCRATCHPAD_PLAN_REUSE", "0") == "1"
 # Enable persistent on-disk caching of compiled Spyre kernels across
 # invocations.
 # Set SPYRE_KERNEL_CACHE=0 to disable.

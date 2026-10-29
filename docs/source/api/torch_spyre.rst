@@ -864,6 +864,14 @@ Environment Variables
        every process. It uses Inductor's ``unsafe_marked_cacheable_functions``
        (see ``_allow_scan_graph_caching``). With ``SPYRE_KERNEL_CACHE=1`` too,
        a restart also reuses the compiled Spyre kernels for these graphs
+   * - ``SPYRE_SCRATCHPAD_PLAN_REUSE``
+     - Reuse a joint scratchpad plan for a later compile in the same process
+       whose solver input is the same (default ``0``; set ``1`` to enable).
+       The buckets of a ``for_each_tile`` kernel differ only in the loop trip
+       count, which the solver input does not carry, so after the first bucket
+       the others skip the cost model and the CP-SAT solve. The reused plan is
+       optimal for the first bucket's objective. Ignored while
+       ``SPYRE_DUMP_COST_EXPR_FILE`` is set
    * - ``SPYRE_NUM_CPUS``
      - CPUs CP-SAT uses to size its search worker pool (config
        ``num_cpus``; ``config.patch(num_cpus=1)`` gives one worker). When
