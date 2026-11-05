@@ -876,6 +876,16 @@ Environment Variables
        the others skip the cost model and the CP-SAT solve. The reused plan is
        optimal for the first bucket's objective. Ignored while
        ``SPYRE_DUMP_COST_EXPR_FILE`` is set
+   * - ``SPYRE_BUNDLE_RUNTIME_TRIP_COUNT``
+     - Pass each concrete loop trip count of an SDSC bundle at launch instead
+       of compiling it in (default ``0``; set ``1`` to enable). The kernel
+       cache key then holds the count's upper bound instead of the count, so
+       kernels that differ only in a trip count share one compiled binary.
+       A runtime bound turns off backend loop unrolling for that loop
+   * - ``SPYRE_BUNDLE_TRIP_COUNT_MAX``
+     - Upper bound of a launch-time trip count (default ``1024``). A loop with
+       a larger count keeps a constant bound. Changing it changes the kernel
+       cache key
    * - ``SPYRE_NUM_CPUS``
      - CPUs CP-SAT uses to size its search worker pool (config
        ``num_cpus``; ``config.patch(num_cpus=1)`` gives one worker). When

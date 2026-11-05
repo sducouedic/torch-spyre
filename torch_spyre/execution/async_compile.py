@@ -38,7 +38,7 @@ from torch_spyre._inductor.op_spec import (
 from torch_spyre._inductor.kernel_provenance import (
     build_kernel_provenance_descriptor,
 )
-from torch_spyre._inductor.codegen.bundle import generate_bundle
+from torch_spyre._inductor.codegen.bundle import bind_loop_counts, generate_bundle
 from torch_spyre.profiler._ffdc import CATEGORY_COMPILE_BACKEND, try_collect
 from .kernel_runner import (
     SpyreFrontendOnlyRunner,
@@ -577,7 +577,7 @@ class SpyreAsyncCompile(AsyncCompile):
                         kernel_name,
                         cached_dir,
                         kernel_provenance,
-                        load_symbol_kinds(cached_dir),
+                        bind_loop_counts(load_symbol_kinds(cached_dir), specs),
                     )
 
                 logger.debug("Cache MISS: Compiling kernel")

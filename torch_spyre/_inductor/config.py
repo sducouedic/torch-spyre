@@ -463,6 +463,19 @@ _cpsat_warn_on_cost_expr: bool = True
 # solve. The replayed plan is optimal for the first bucket's objective.
 # Off by default; set SPYRE_SCRATCHPAD_PLAN_REUSE=1 to enable.
 scratchpad_plan_reuse: bool = os.environ.get("SPYRE_SCRATCHPAD_PLAN_REUSE", "0") == "1"
+
+# Emit each concrete loop trip count of an SDSC bundle as a launch argument
+# (!sdscbundle.input_arg<index, granularity=1, max_value=M>) instead of a
+# constant, and key the kernel cache on M instead of the count. Kernels that
+# differ only in a trip count up to M then share one compiled binary: the
+# first compile is cached and the others hit it. A loop whose count is above
+# M keeps a constant bound. A runtime bound turns off backend loop unrolling
+# for that loop. Off by default; set SPYRE_BUNDLE_RUNTIME_TRIP_COUNT=1 to
+# enable and SPYRE_BUNDLE_TRIP_COUNT_MAX to set M.
+bundle_runtime_trip_count: bool = (
+    os.environ.get("SPYRE_BUNDLE_RUNTIME_TRIP_COUNT", "0") == "1"
+)
+bundle_trip_count_max: int = int(os.environ.get("SPYRE_BUNDLE_TRIP_COUNT_MAX", "1024"))
 # Enable persistent on-disk caching of compiled Spyre kernels across
 # invocations.
 # Set SPYRE_KERNEL_CACHE=0 to disable.

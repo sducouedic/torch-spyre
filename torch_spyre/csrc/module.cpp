@@ -741,10 +741,11 @@ PYBIND11_MODULE(_C, m) {
 
   // Test-only seam: exposes JobPlanStepHostCompute::resolveSymbolicArgs so
   // that Python tests can verify the HostComputeArg ordering without needing
-  // a live HCM or device execution. Returns one integer (CompositeAddress*
-  // cast to uintptr_t) per resolved slot — same tensor yields the same
-  // integer, different tensor yields a different integer, so any ordering bug
-  // inside resolveSymbolicArgs is directly visible as a mismatched int vector.
+  // a live HCM or device execution. Returns one integer per resolved slot: an
+  // address slot gives the CompositeAddress* cast to uintptr_t (same tensor
+  // yields the same integer, different tensor a different one), and a
+  // kDimension slot gives its value. Any ordering bug inside
+  // resolveSymbolicArgs is directly visible as a mismatched int vector.
   // The "_" prefix signals this is not part of the stable public API.
   m.def(
       "_resolve_symbolic_args",
@@ -753,18 +754,23 @@ PYBIND11_MODULE(_C, m) {
         const auto resolved =
             spyre::JobPlanStepHostCompute::resolveSymbolicArgs(tensors,
                                                                symbolic_args);
-        std::vector<uintptr_t> addrs;
-        addrs.reserve(resolved.size());
+        std::vector<uintptr_t> values;
+        values.reserve(resolved.size());
         for (const auto& host_arg : resolved) {
-          addrs.push_back(reinterpret_cast<uintptr_t>(
-              std::get<const flex::CompositeAddress*>(host_arg)));
+          if (const auto* addr =
+                  std::get_if<const flex::CompositeAddress*>(&host_arg)) {
+            values.push_back(reinterpret_cast<uintptr_t>(*addr));
+          } else {
+            values.push_back(
+                static_cast<uintptr_t>(std::get<int64_t>(host_arg)));
+          }
         }
-        return addrs;
+        return values;
       },
       py::arg("tensors"), py::arg("symbolic_args"),
-      "Test-only: resolve a symbolic_args payload to a list of device-address "
-      "integers (CompositeAddress* cast to uintptr_t). Same tensor yields the "
-      "same integer; different tensor yields a different integer.");
+      "Test-only: resolve a symbolic_args payload to a list of integers, one "
+      "per slot. An address slot gives the CompositeAddress* cast to uintptr_t "
+      "(same tensor, same integer); a kDimension slot gives its value.");
 
   // ── Two-stream overlap: step-ordering validator + test hooks ──
 

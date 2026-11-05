@@ -211,10 +211,9 @@ enum class StepKind {
  * kAddress  – the slot carries the HBM device address of a tensor.
  *             value is resolved via compositeAddressToDeviceAddress() on
  *             inputs_outputs[tensor_id].
- * kDimension – the slot carries a runtime tensor dimension size,
- *             resolved by the frontend and stored in SymbolicArg::value.
- *             The consumer will TORCH_CHECK-fail on this kind until it
- *             is implemented.
+ * kDimension – the slot carries a runtime index value (a dimension size or
+ *             a loop trip count), resolved by the frontend and stored in
+ *             SymbolicArg::value.
  */
 enum class SymbolicArgKind : int32_t {
   kAddress = 0,
@@ -558,7 +557,8 @@ class JobPlanStepHostCompute final : public JobPlanStep {
   /**
    * @brief Resolve a symbolic_args payload to a vector of HostComputeArgs.
    *
-   * NOTE: kDimension is not yet implemented; only kAddress is supported.
+   * A kAddress slot resolves to the tensor's composite address, a
+   * kDimension slot to SymbolicArg::value.
    */
   static std::vector<flex::HostComputeArg> resolveSymbolicArgs(
       const std::vector<at::Tensor>& tensors,

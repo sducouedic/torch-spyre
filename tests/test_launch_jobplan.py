@@ -336,21 +336,16 @@ class TestD2HFromTensorSegment(TestCase):
 
 
 class TestSymbolicArg(TestCase):
-    """
-    Unit tests for the SymbolicArg typed payload.
+    """Unit tests for the SymbolicArg typed payload."""
 
-    Notes:
-        Tests will need to be reworked once kdimension is implemented.
-    """
-
-    def test_kdimension_entry_reaches_construct_and_raises(self):
+    def test_kdimension_entry_reaches_construct(self):
         """A kDimension entry traverses Python → pybind → LaunchContext →
-        construct() and raises 'kDimension is not yet implemented'.
+        construct() and has its value checked there.
 
         Uses a real-symbols ComputeOnHost step (non-{0} ishape) so the
         payload is consumed rather than short-circuited by the fake-symbols
-        nullptr path.  The raise proves the entry survived the full carrier
-        path and was read positionally from slot 0.
+        nullptr path. The entry carries no value (-1), so construct() rejects
+        it, which proves the entry was read positionally from slot 0.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             spyrecode_dir = tpk().create_mock_spyrecode(
@@ -369,9 +364,7 @@ class TestSymbolicArg(TestCase):
 
             stream = torch.Stream("spyre")
             with stream:
-                with pytest.raises(
-                    RuntimeError, match="kDimension is not yet implemented"
-                ):
+                with pytest.raises(RuntimeError, match="kDimension value must be >= 0"):
                     torch_spyre._C.launch_jobplan(job_plan, [t], symbolic_args=payload)
 
     def test_symbolic_arg_attributes_and_repr_roundtrip(self):

@@ -262,6 +262,7 @@ def compute_specs_hash(
         ktir_device_mlir: Resolved device override passed to the backend compiler.
                           Defaults to the active Spyre config.
     """
+    from torch_spyre._inductor.codegen.bundle import runtime_trip_count_max
     from torch_spyre._inductor.codegen.superdsc import compile_op_spec
     from torch_spyre._inductor.op_spec import LoopSpec, OpSpec
     from torch_spyre._inductor import config as _spyre_config
@@ -290,8 +291,14 @@ def compute_specs_hash(
             if isinstance(entry, LoopSpec):
                 # Include the trip count so loops with different iteration
                 # counts never collide, even when their body OpSpecs produce
-                # identical SDSC JSON.
-                loop_count_str = str(entry.count)
+                # identical SDSC JSON. A count passed at launch is not in the
+                # binary, so its max_value is hashed instead.
+                runtime_max = runtime_trip_count_max(entry.count)
+                loop_count_str = (
+                    str(entry.count)
+                    if runtime_max is None
+                    else f"runtime<={runtime_max}"
+                )
                 content_parts.append(f"loop_count:{loop_count_str}".encode())
                 _debug_loop_counts.append(loop_count_str)
                 logger.debug("  [hash] LoopSpec  count=%s", loop_count_str)

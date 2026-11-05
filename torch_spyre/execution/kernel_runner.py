@@ -118,28 +118,35 @@ class SpyreSDSCKernelRunner:
         # symbol_kinds matches the MLIR input_arg slot order: pool first
         # (when frontend_pool_allocation is active), then kernel tensor
         # args in arg_index order. The payload is invariant across launches.
+        # A loop_count slot carries this kernel's own trip count as a
+        # kDimension value, so one cached binary serves every count.
         if self.symbol_kinds:
-            if self.symbol_kinds[0].is_pool:
-                # call_kernel prepends the pool tensor to args, so it sits at
-                # args[0].  Kernel tensor arg_indices are 0-based among kernel
-                # tensors only, so add 1 to account for the pool.
-                self._symbolic_args: list[SymbolicArg] | None = (
-                    [SymbolicArg(kind=SymbolicArgKind.kAddress, tensor_id=0)]
-                ) + (
-                    [
+            # call_kernel prepends the pool tensor to args when there is one,
+            # so it sits at args[0].  Kernel tensor arg_indices are 0-based
+            # among kernel tensors only, so add 1 to account for the pool.
+            offset = 1 if self.symbol_kinds[0].is_pool else 0
+            payload: list[SymbolicArg] = []
+            for sk in self.symbol_kinds:
+                if sk.is_pool:
+                    payload.append(
+                        SymbolicArg(kind=SymbolicArgKind.kAddress, tensor_id=0)
+                    )
+                elif sk.is_loop_count:
+                    payload.append(
+                        SymbolicArg(
+                            kind=SymbolicArgKind.kDimension,
+                            tensor_id=-1,
+                            value=sk.trip_count,
+                        )
+                    )
+                else:
+                    payload.append(
                         SymbolicArg(
                             kind=SymbolicArgKind.kAddress,
-                            tensor_id=sk.arg_index + 1,
+                            tensor_id=sk.arg_index + offset,
                         )
-                        for sk in self.symbol_kinds[1:]
-                    ]
-                )
-            else:
-                # No pool param — arg_index maps directly to args position.
-                self._symbolic_args = [
-                    SymbolicArg(kind=SymbolicArgKind.kAddress, tensor_id=sk.arg_index)
-                    for sk in self.symbol_kinds
-                ]
+                    )
+            self._symbolic_args: list[SymbolicArg] | None = payload
         else:
             self._symbolic_args = None
 

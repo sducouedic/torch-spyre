@@ -134,23 +134,27 @@ void JobPlanStepCompute::write(std::ostream& os) const {
      << "\n";
 }
 
-// NOTE: kDimension is not yet implemented; only kAddress is supported.
 std::vector<flex::HostComputeArg> JobPlanStepHostCompute::resolveSymbolicArgs(
     const std::vector<at::Tensor>& tensors,
     const std::vector<SymbolicArg>& symbolic_args) {
   std::vector<flex::HostComputeArg> resolved(symbolic_args.size());
   for (size_t i = 0; i < symbolic_args.size(); ++i) {
     const SymbolicArg& arg = symbolic_args[i];
-    TORCH_CHECK(arg.tensor_id >= 0 &&
-                    static_cast<size_t>(arg.tensor_id) < tensors.size(),
+    // A kDimension slot carries its value and reads no tensor.
+    TORCH_CHECK(arg.kind == SymbolicArgKind::kDimension ||
+                    (arg.tensor_id >= 0 &&
+                     static_cast<size_t>(arg.tensor_id) < tensors.size()),
                 "symbolic_args tensor_id out of range");
     switch (arg.kind) {
       case SymbolicArgKind::kAddress:
         resolved[i] = get_composite_address(tensors[arg.tensor_id]);
         break;
       case SymbolicArgKind::kDimension:
-        TORCH_CHECK(false,
-                    "SymbolicArgKind::kDimension is not yet implemented");
+        // A runtime index value, such as a loop trip count, resolved by the
+        // frontend for this launch.
+        TORCH_CHECK(arg.value >= 0, "symbolic_args[", i,
+                    "] kDimension value must be >= 0, got ", arg.value);
+        resolved[i] = static_cast<int64_t>(arg.value);
         break;
       default:
         TORCH_CHECK(false, "Unknown SymbolicArgKind value: ",

@@ -76,6 +76,9 @@ def generate_bundle(
     constants) in ``bundle.mlir``. Dimension symbols (from ``mark_dynamic``)
     always produce
     ``!sdscbundle.input_arg<index, granularity=G, max_value=M>`` parameters.
+    With ``config.bundle_runtime_trip_count``, a concrete loop trip count up to
+    ``config.bundle_trip_count_max`` is also a parameter of that form, placed
+    after all others, so the binary does not depend on the count.
 
     Requires ``config.bundle_symbolic_args`` to be True: the SDSC path
     (this function) unconditionally emits symbolic addresses, but
@@ -166,6 +169,12 @@ def generate_bundle(
     # Collect loop bounds and affine maps needed across the whole tree.
     loop_bounds: list[sympy.Expr] = []
     _collect_loop_bounds(specs_list, loop_bounds)
+    # Loops whose trip count is a launch argument: lb_idx -> max_value.
+    runtime_loops: dict[int, int] = {}
+    for lb_idx, lb in enumerate(loop_bounds):
+        max_value = runtime_trip_count_max(lb)
+        if max_value is not None:
+            runtime_loops[lb_idx] = max_value
 
     # Affine map deduplication: stride_key -> map index (0-based).
     # A stride_key is a tuple of stride values in outermost-first level order.
@@ -278,7 +287,12 @@ def generate_bundle(
         # Built in lock-step with the params list so the two can never diverge.
         # Order: pool (when frontend_pool_allocation), kernel addresses, dimensions.
         param_symbol_kinds: list[SymbolKind] = []
-        if emit_pool_param or kernel_arg_sym_indices or dimension_sym_indices:
+        if (
+            emit_pool_param
+            or kernel_arg_sym_indices
+            or dimension_sym_indices
+            or runtime_loops
+        ):
             params = []
             if emit_pool_param:
                 params.append("%pool_base_addr: !sdscbundle.input_arg<index>")
@@ -293,6 +307,14 @@ def generate_bundle(
                     f"{dim_param_names[sym_idx]}_base: {_dim_input_arg_type(dim_sk)}"
                 )
                 param_symbol_kinds.append(symbol_kinds[sym_idx])
+            # Last, so trip counts never shift the position of another
+            # parameter: the runtime fills the slots by order.
+            for lb_idx, max_value in runtime_loops.items():
+                name, arg_type = _loop_count_param(lb_idx, max_value)
+                params.append(f"{name}: {arg_type}")
+                param_symbol_kinds.append(
+                    SymbolKind.loop_count(lb_idx, max_value, int(loop_bounds[lb_idx]))
+                )
             f.write(f"\tfunc.func @sdsc_bundle({', '.join(params)}) {{\n")
         else:
             f.write("\tfunc.func @sdsc_bundle() {\n")
@@ -332,7 +354,14 @@ def generate_bundle(
             f.write("\t\t%c0 = arith.constant 0 : index\n")
             f.write("\t\t%c1 = arith.constant 1 : index\n")
             for lb_idx, lb in enumerate(loop_bounds):
-                f.write(f"\t\t%loop_bound_{lb_idx} = {_mlir_count_value(lb)}\n")
+                if lb_idx in runtime_loops:
+                    name, arg_type = _loop_count_param(lb_idx, runtime_loops[lb_idx])
+                    f.write(
+                        f"\t\t%loop_bound_{lb_idx} = sdscbundle.input_arg_extract"
+                        f" value from {name} : {arg_type} -> index\n"
+                    )
+                else:
+                    f.write(f"\t\t%loop_bound_{lb_idx} = {_mlir_count_value(lb)}\n")
 
         # Emit one declaration per symbol:
         #   - "kernel"          → skipped; already a function param + extract op above
@@ -657,6 +686,64 @@ def _collect_affine_maps(
 # ---------------------------------------------------------------------------
 # Pass 2 helpers
 # ---------------------------------------------------------------------------
+
+
+def runtime_trip_count_max(count: Any) -> int | None:
+    """The ``max_value`` a loop with this trip count is emitted with, or None.
+
+    None means the count is emitted as a constant. Shared by ``generate_bundle``
+    and the kernel cache key so the two always agree on which loops take their
+    count at launch.
+    """
+    if not _spyre_config.bundle_runtime_trip_count:
+        return None
+    if not isinstance(count, (sympy.Integer, int)):
+        return None
+    max_value = _spyre_config.bundle_trip_count_max
+    if 1 <= int(count) <= max_value:
+        return max_value
+    return None
+
+
+def collect_loop_counts(specs: Sequence) -> list[Any]:
+    """Trip counts of every LoopSpec in ``specs``, depth-first."""
+    counts: list[Any] = []
+    _collect_loop_bounds(list(specs), counts)
+    return counts
+
+
+def bind_loop_counts(
+    symbol_kinds: list[SymbolKind], specs: Sequence
+) -> list[SymbolKind]:
+    """Return ``symbol_kinds`` with each loop_count bound to the count in ``specs``.
+
+    A cached bundle stores the trip counts of the kernel that first compiled it.
+    A kernel that hits that entry launches with its own counts, read here from
+    its own specs.
+    """
+    if not any(sk.is_loop_count for sk in symbol_kinds):
+        return symbol_kinds
+    counts = collect_loop_counts(specs)
+    bound: list[SymbolKind] = []
+    for sk in symbol_kinds:
+        if sk.is_loop_count:
+            count = int(counts[sk.loop_index])
+            if not 1 <= count <= sk.max_value:
+                raise ValueError(
+                    f"loop {sk.loop_index} has trip count {count}, outside the "
+                    f"[1, {sk.max_value}] range of the cached bundle"
+                )
+            sk = SymbolKind.loop_count(sk.loop_index, sk.max_value, count)
+        bound.append(sk)
+    return bound
+
+
+def _loop_count_param(lb_idx: int, max_value: int) -> tuple[str, str]:
+    """(parameter name, input_arg type) for a launch-time trip count."""
+    return (
+        f"%loop_count_{lb_idx}",
+        f"!sdscbundle.input_arg<index, granularity=1, max_value={max_value}>",
+    )
 
 
 def _mlir_count_value(count: sympy.Expr) -> str:

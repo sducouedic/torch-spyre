@@ -34,7 +34,7 @@ from torch_spyre._inductor.pass_utils import coeff_through_floor
 class SymbolKind:
     """Classifies a symbol registered in the bundle symbol table.
 
-    Five variants (constructed via class methods):
+    Variants (constructed via class methods):
       - ``kernel(arg_index)``:               raw HBM base address of a kernel tensor arg;
                                              emitted as a ``!sdscbundle.input_arg`` param
                                              named ``%arg_{arg_index}``.  Value =
@@ -93,6 +93,11 @@ class SymbolKind:
                                              ``dimToSymbolMapping_`` entry.  Registered
                                              before address symbols so their negative IDs
                                              never collide with address symbol IDs.
+      - ``loop_count(idx, max, count)``:     concrete loop trip count emitted as a
+                                             ``!sdscbundle.input_arg<index, granularity=1,
+                                             max_value=max>`` parameter when
+                                             ``config.bundle_runtime_trip_count`` is on.
+                                             Bound at launch as a ``kDimension`` value.
     """
 
     kind: str
@@ -105,6 +110,9 @@ class SymbolKind:
     # Only meaningful for the kernel_derived_symbolic variant.
     core_idx: int = -1
     split_count: int = 0
+    # Only meaningful for the loop_count variant.
+    loop_index: int = -1
+    trip_count: int = -1
 
     @classmethod
     def kernel(cls, arg_index: int) -> "SymbolKind":
@@ -177,9 +185,32 @@ class SymbolKind:
     def is_pool(self) -> bool:
         return self.kind == "pool"
 
+    @classmethod
+    def loop_count(
+        cls, loop_index: int, max_value: int, trip_count: int
+    ) -> "SymbolKind":
+        """Trip count of loop ``loop_index``, passed at launch.
+
+        ``loop_index`` is the loop's position in depth-first LoopSpec order.
+        ``trip_count`` is the value bound at launch; it comes from the specs
+        being launched, not from the compiled bundle, so one binary serves
+        every count up to ``max_value``.
+        """
+        return cls(
+            kind="loop_count",
+            granularity=1,
+            max_value=max_value,
+            loop_index=loop_index,
+            trip_count=trip_count,
+        )
+
     @property
     def is_dimension(self) -> bool:
         return self.kind == "dimension"
+
+    @property
+    def is_loop_count(self) -> bool:
+        return self.kind == "loop_count"
 
 
 def core_idx_to_slice_offset(
