@@ -31,6 +31,9 @@ def test_compiles_run_in_children_and_stand_ins_refuse_to_run(monkeypatch, tmp_p
     def fake_inner(name, **kwargs):
         assert os.getpid() != parent
         assert torch._inductor.config.compile_threads == 1
+        from torch_spyre._inductor import config as spyre_config
+
+        assert spyre_config.get_cpu_count() == 1
         assert torch.get_num_threads() == 1
         (tmp_path / name).write_text(repr(kwargs))
 
