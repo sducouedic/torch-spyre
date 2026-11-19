@@ -179,6 +179,12 @@ def _new_uncached_bundle_dir_prefix() -> str:
     return uuid.uuid4().hex[:_UNCACHED_BUNDLE_DIR_PREFIX_LEN]
 
 
+# Set in a forked compile (parallel_precompile.py): each child runs one thread, and
+# dbo-opt's MLIR thread pool in every child at once runs the pod out of threads.
+# Threading does not change what dbo-opt emits.
+single_threaded_backend = False
+
+
 def _check_backend_compiler_on_path() -> None:
     """Raise unless ``dbo-opt`` can be found, before a bundle is emitted.
 
@@ -283,6 +289,8 @@ def _run_backend_compiler(
     # Always pass the resolved value, including the default, so compilation
     # matches the cache key instead of depending on dbo-opt's own default.
     cmd.append(f"--enable-loop-unroll={int(backend_loop_unroll)}")
+    if single_threaded_backend:
+        cmd.append("--mlir-disable-threading")
     cmd += [
         f"--export-dir={compile_dir}",
         "-kEmitSpyreCode",

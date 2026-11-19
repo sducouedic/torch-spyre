@@ -32,11 +32,11 @@ What a child may use: the compile itself (Python, the Inductor and Spyre lowerin
 code, CP-SAT, and dbo-opt as a subprocess). What it may not use: the device. Every
 Python entry point of the Spyre runtime (start, allocation, copies, fills, streams,
 synchronize, kernel preparation) raises in a child, and so does the eager copy op.
-The child runs on one thread with ``compile_threads = 1`` and a one-worker CP-SAT
-(``config.num_cpus = 1``), so it starts no worker pool of its own (#4427's pool
-stays in the parent), and it never takes a lock that another thread of the parent
-could hold at fork time: such a lock stays held in the child, so a compile that
-needed it would hang and be killed by the timeout.
+The child runs on one thread with ``compile_threads = 1``, a one-worker CP-SAT
+(``config.num_cpus = 1``) and a single-threaded dbo-opt, so it starts no worker pool
+of its own (#4427's pool stays in the parent), and it never takes a lock that another
+thread of the parent could hold at fork time: such a lock stays held in the child, so
+a compile that needed it would hang and be killed by the timeout.
 
 Limits: Linux only (``os.fork``). Each child is a copy-on-write copy of the caller.
 For a vLLM engine with Granite 3.3 8B and 8 workers, the peak resident memory of the
@@ -103,6 +103,7 @@ def _child_setup() -> None:
 
     import torch_spyre._C as spyre_c
     import torch_spyre.ops.eager as spyre_eager
+    import torch_spyre.execution.async_compile as spyre_async_compile
     from torch_spyre._inductor import config as spyre_config
 
     os.setsid()  # own process group, so a kill also stops dbo-opt
@@ -112,6 +113,7 @@ def _child_setup() -> None:
     # CP-SAT sizes its worker pool from the CPU quota, which the parent and every
     # other child already use: n children would start n times that many threads.
     spyre_config.num_cpus = 1
+    spyre_async_compile.single_threaded_backend = True  # dbo-opt without its thread pool
     for name in _DEVICE_ENTRY_POINTS:  # the device stays with the caller
         if hasattr(spyre_c, name):
             setattr(spyre_c, name, _no_device)

@@ -34,6 +34,9 @@ def test_compiles_run_in_children_and_stand_ins_refuse_to_run(monkeypatch, tmp_p
         from torch_spyre._inductor import config as spyre_config
 
         assert spyre_config.get_cpu_count() == 1
+        import torch_spyre.execution.async_compile as spyre_async_compile
+
+        assert spyre_async_compile.single_threaded_backend
         assert torch.get_num_threads() == 1
         (tmp_path / name).write_text(repr(kwargs))
 
