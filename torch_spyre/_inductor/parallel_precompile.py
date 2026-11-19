@@ -207,8 +207,11 @@ def _load_if_cached(original: Callable[..., Any], args: tuple, kwargs: dict) -> 
     compile_fx.fx_codegen_and_compile = miss
     try:
         return original(*args, **kwargs)
-    except _CacheMiss:
-        return None
+    except Exception as exc:
+        # compile_fx_inner re-raises what codegen raised as an InductorError.
+        if isinstance(getattr(exc, "inner_exception", exc), _CacheMiss):
+            return None
+        raise
     finally:
         compile_fx.fx_codegen_and_compile = codegen
 

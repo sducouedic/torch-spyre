@@ -78,13 +78,18 @@ def test_should_fork_keeps_compiles_in_this_process(monkeypatch, tmp_path):
 
 def test_cache_hits_load_in_this_process_and_misses_fork(monkeypatch, tmp_path):
     import torch._inductor.compile_fx as compile_fx
+    from torch._inductor.exc import InductorError
 
     parent = os.getpid()
 
     def fake_inner(name, cached):
-        # As compile_fx_inner: a cache hit returns before the codegen runs.
+        # As compile_fx_inner: a cache hit returns before the codegen runs, and what
+        # the codegen raises comes back as an InductorError.
         if not cached:
-            compile_fx.fx_codegen_and_compile()
+            try:
+                compile_fx.fx_codegen_and_compile()
+            except Exception as exc:
+                raise InductorError(exc, None) from exc
         (tmp_path / name).write_text(str(os.getpid()))
         return f"graph {name}"
 
