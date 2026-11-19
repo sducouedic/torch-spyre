@@ -50,6 +50,26 @@ def test_compiles_run_in_children_and_stand_ins_refuse_to_run(monkeypatch, tmp_p
         stand_ins[0]([1])
 
 
+def test_should_fork_keeps_compiles_in_this_process(monkeypatch, tmp_path):
+    parent = os.getpid()
+
+    def fake_inner(name):
+        (tmp_path / name).write_text(str(os.getpid()))
+        return f"graph {name}"
+
+    monkeypatch.setattr(spyre_inductor, "_spyre_inner_compile", fake_inner)
+    fork = [False]
+    with pp.fork_inner_compiles(2, should_fork=lambda: fork[0]) as pool:
+        assert spyre_inductor._spyre_inner_compile("inline") == "graph inline"
+        fork[0] = True
+        stand_in = spyre_inductor._spyre_inner_compile("forked")
+        with pytest.raises(pp.CompileOnlyAbort):
+            stand_in([1])
+    assert (pool.ok, pool.failed, pool.inline) == (1, 0, 1)
+    assert int((tmp_path / "inline").read_text()) == parent
+    assert int((tmp_path / "forked").read_text()) != parent
+
+
 def test_failed_hung_and_device_children_are_counted(monkeypatch, tmp_path):
     def fake_inner(kind):
         if kind == "fail":

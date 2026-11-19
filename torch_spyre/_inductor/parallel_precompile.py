@@ -123,6 +123,7 @@ class _Pool:
         self.running: dict[int, float] = {}  # pid -> start time
         self.ok = 0
         self.failed = 0
+        self.inline = 0  # compiles that ``should_fork`` kept in this process
 
     @staticmethod
     def _kill(pid: int) -> None:
@@ -178,8 +179,17 @@ class _Pool:
 
 
 @contextlib.contextmanager
-def fork_inner_compiles(workers: int, timeout_s: float = 300.0):
+def fork_inner_compiles(
+    workers: int,
+    timeout_s: float = 300.0,
+    should_fork: Optional[Callable[[], bool]] = None,
+):
     """Run each Spyre inner compile in a forked child, at most ``workers`` at once.
+
+    ``should_fork``, when given, is called at each inner compile. When it returns
+    False, that compile runs in this process as usual and returns a real graph, so
+    the caller can keep going past it (for example small graphs between the ones it
+    wants in children).
 
     Yields the pool. Leaving the block waits for every child, or kills them all if
     the block raised.
@@ -189,7 +199,10 @@ def fork_inner_compiles(workers: int, timeout_s: float = 300.0):
     original = spyre_inductor._spyre_inner_compile
     pool = _Pool(max(1, workers), timeout_s)
 
-    def inner_compile(*args: Any, **kwargs: Any) -> _StandIn:
+    def inner_compile(*args: Any, **kwargs: Any) -> Any:
+        if should_fork is not None and not should_fork():
+            pool.inline += 1
+            return original(*args, **kwargs)
         pool.submit(lambda: original(*args, **kwargs))
         return _StandIn(pool)
 
@@ -205,9 +218,11 @@ def fork_inner_compiles(workers: int, timeout_s: float = 300.0):
         pool.wait()
         pool.open = False
     logger.info(
-        "parallel precompile: %d compiles ok, %d failed, %d workers, %.1f s",
+        "parallel precompile: %d compiles ok, %d failed, %d in this process, "
+        "%d workers, %.1f s",
         pool.ok,
         pool.failed,
+        pool.inline,
         pool.workers,
         time.time() - started,
     )
