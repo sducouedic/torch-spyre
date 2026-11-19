@@ -76,6 +76,32 @@ def test_should_fork_keeps_compiles_in_this_process(monkeypatch, tmp_path):
     assert int((tmp_path / "forked").read_text()) != parent
 
 
+def test_cache_hits_load_in_this_process_and_misses_fork(monkeypatch, tmp_path):
+    import torch._inductor.compile_fx as compile_fx
+
+    parent = os.getpid()
+
+    def fake_inner(name, cached):
+        # As compile_fx_inner: a cache hit returns before the codegen runs.
+        if not cached:
+            compile_fx.fx_codegen_and_compile()
+        (tmp_path / name).write_text(str(os.getpid()))
+        return f"graph {name}"
+
+    monkeypatch.setattr(spyre_inductor, "_spyre_inner_compile", fake_inner)
+    monkeypatch.setattr(compile_fx, "fx_codegen_and_compile", lambda: None)
+    codegen = compile_fx.fx_codegen_and_compile
+    with pp.fork_inner_compiles(2, load_cache_hits=True) as pool:
+        assert spyre_inductor._spyre_inner_compile("hit", True) == "graph hit"
+        stand_in = spyre_inductor._spyre_inner_compile("miss", False)
+        with pytest.raises(pp.CompileOnlyAbort):
+            stand_in([1])
+    assert (pool.ok, pool.cached) == (1, 1)
+    assert int((tmp_path / "hit").read_text()) == parent
+    assert int((tmp_path / "miss").read_text()) != parent
+    assert compile_fx.fx_codegen_and_compile is codegen
+
+
 def test_failed_hung_and_device_children_are_counted(monkeypatch, tmp_path):
     def fake_inner(kind):
         if kind == "fail":

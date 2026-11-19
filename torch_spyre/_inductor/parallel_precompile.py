@@ -131,6 +131,7 @@ class _Pool:
         self.ok = 0
         self.failed = 0
         self.inline = 0  # compiles that ``should_fork`` kept in this process
+        self.cached = 0  # FX graph cache hits, loaded in this process
 
     @staticmethod
     def _kill(pid: int) -> None:
@@ -185,11 +186,39 @@ class _Pool:
         self.wait()
 
 
+class _CacheMiss(Exception):
+    """Raised in place of the codegen of a compile that missed the FX graph cache."""
+
+
+def _load_if_cached(original: Callable[..., Any], args: tuple, kwargs: dict) -> Any:
+    """The compiled graph when the FX graph cache holds it, else None.
+
+    The inner compile reads the FX graph cache first and generates code only on a
+    miss, so running it here with the codegen replaced by a raise loads a hit in this
+    process and costs only the cache key on a miss.
+    """
+    import torch._inductor.compile_fx as compile_fx
+
+    codegen = compile_fx.fx_codegen_and_compile
+
+    def miss(*a: Any, **k: Any) -> Any:
+        raise _CacheMiss()
+
+    compile_fx.fx_codegen_and_compile = miss
+    try:
+        return original(*args, **kwargs)
+    except _CacheMiss:
+        return None
+    finally:
+        compile_fx.fx_codegen_and_compile = codegen
+
+
 @contextlib.contextmanager
 def fork_inner_compiles(
     workers: int,
     timeout_s: float = 300.0,
     should_fork: Optional[Callable[[], bool]] = None,
+    load_cache_hits: bool = False,
 ):
     """Run each Spyre inner compile in a forked child, at most ``workers`` at once.
 
@@ -197,6 +226,10 @@ def fork_inner_compiles(
     False, that compile runs in this process as usual and returns a real graph, so
     the caller can keep going past it (for example small graphs between the ones it
     wants in children).
+
+    With ``load_cache_hits``, a compile whose graph is in the FX graph cache loads
+    it in this process and returns the real graph instead of forking, so a restart
+    with warm caches runs its graphs and forks nothing.
 
     Yields the pool. Leaving the block waits for every child, or kills them all if
     the block raised.
@@ -210,6 +243,11 @@ def fork_inner_compiles(
         if should_fork is not None and not should_fork():
             pool.inline += 1
             return original(*args, **kwargs)
+        if load_cache_hits:
+            graph = _load_if_cached(original, args, kwargs)
+            if graph is not None:
+                pool.cached += 1
+                return graph
         pool.submit(lambda: original(*args, **kwargs))
         return _StandIn(pool)
 
@@ -226,10 +264,11 @@ def fork_inner_compiles(
         pool.open = False
     logger.info(
         "parallel precompile: %d compiles ok, %d failed, %d in this process, "
-        "%d workers, %.1f s",
+        "%d cache hits, %d workers, %.1f s",
         pool.ok,
         pool.failed,
         pool.inline,
+        pool.cached,
         pool.workers,
         time.time() - started,
     )
