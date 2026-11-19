@@ -101,6 +101,8 @@ below are written once against whichever wrapper ``_wrap`` chose.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import cache
@@ -618,6 +620,45 @@ class _CoreDivisionBufferWithCpVars(_LifetimeBufferWithCpVars[CoreDivisionBuffer
 
     def decision_variables(self) -> list:
         return [*super().decision_variables(), self.division]
+
+
+class _StallStop(cp_model.CpSolverSolutionCallback if cp_model else object):  # type: ignore[misc]
+    """Stops a solve once its best plan has not improved for ``stall_seconds``.
+
+    CP-SAT calls ``on_solution_callback`` on each better plan of an objective
+    solve. A watcher thread checks the time since the last one and calls
+    ``StopSearch``, which is safe from another thread; the solve then returns
+    FEASIBLE with that plan, as on a time limit. Nothing stops before the first
+    plan, so a solve with none still ends at the time limit.
+    """
+
+    def __init__(self, solver: "cp_model.CpSolver", stall_seconds: float) -> None:
+        super().__init__()
+        self._solver = solver
+        self._stall = stall_seconds
+        self._last: Optional[float] = None
+        self._done = threading.Event()
+        self.stopped = False
+        self._watcher = threading.Thread(
+            target=self._watch, name="cpsat-stall-stop", daemon=True
+        )
+        self._watcher.start()
+
+    def on_solution_callback(self) -> None:
+        self._last = time.monotonic()
+
+    def _watch(self) -> None:
+        step = min(0.1, self._stall / 4)
+        while not self._done.wait(step):
+            last = self._last
+            if last is not None and time.monotonic() - last >= self._stall:
+                self.stopped = True
+                self._solver.StopSearch()
+                return
+
+    def close(self) -> None:
+        self._done.set()
+        self._watcher.join()
 
 
 class CpSatLayoutSolver(CoreDivisionLayoutSolver):
@@ -1346,7 +1387,13 @@ class CpSatLayoutSolver(CoreDivisionLayoutSolver):
         Nothing else in the pipeline records this, so "why was that compile
         slow" currently has no artifact behind it.
         """
-        status = solver.Solve(model)
+        stall = config.cpsat_stall_seconds
+        stop = _StallStop(solver, stall) if stall > 0 else None
+        try:
+            status = solver.Solve(model) if stop is None else solver.Solve(model, stop)
+        finally:
+            if stop is not None:
+                stop.close()
         self.last_solve_stats = {
             "status": solver.StatusName(status),
             "solve_s": round(solver.WallTime(), 3),
@@ -1355,6 +1402,8 @@ class CpSatLayoutSolver(CoreDivisionLayoutSolver):
             "limit_s": solver.parameters.max_time_in_seconds or None,
             "objective_used": objective,
         }
+        if stop is not None:
+            self.last_solve_stats["stall_stopped"] = stop.stopped
         return status
 
     def _run(

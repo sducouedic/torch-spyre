@@ -480,6 +480,13 @@ cpsat_time_limit_seconds: float = float(
     os.environ.get("CPSAT_TIME_LIMIT_SECONDS", "60")
 )
 
+# Stop a CP-SAT solve once its best plan has not improved for this many seconds,
+# and keep that plan. A large solve often finds its best plan well before
+# ``cpsat_time_limit_seconds`` and spends the rest of the budget failing to prove
+# it optimal; this ends that search early. The stop needs a plan, so a solve
+# with none still runs to the time limit. 0 disables it.
+cpsat_stall_seconds: float = float(os.environ.get("CPSAT_STALL_SECONDS", "0"))
+
 
 def _positive_int_env(name: str) -> int | None:
     """``name`` as a positive integer, or None when it is unset or not one."""

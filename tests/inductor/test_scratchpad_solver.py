@@ -20,6 +20,8 @@ import math
 import os
 import subprocess
 import sys
+import threading
+import time
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -2958,6 +2960,84 @@ class SolveStatsTest(TestCase):
         with config.patch({"_cpsat_warn_on_cost_expr": True}):
             solver.plan_layout_and_core_divisions(unlowerable)
         self.assertFalse(solver.last_solve_stats["objective_used"])
+
+
+class _PlateauSolver:
+    """A stand-in ``CpSolver`` whose search reports ``plans`` better plans, then
+    runs until ``StopSearch`` or ``limit_s``, like a solve that cannot prove its
+    last plan optimal."""
+
+    def __init__(self, plans: int, limit_s: float = 10.0) -> None:
+        self.parameters = types.SimpleNamespace(max_time_in_seconds=limit_s)
+        self._plans = plans
+        self._stopped = threading.Event()
+        self.callback = None
+        self._wall = 0.0
+
+    def Solve(self, model, callback=None):
+        self.callback = callback
+        start = time.monotonic()
+        for _ in range(self._plans):
+            if callback is not None:
+                callback.on_solution_callback()
+        self._stopped.wait(self.parameters.max_time_in_seconds)
+        self._wall = time.monotonic() - start
+        return cp_model.FEASIBLE if self._plans else cp_model.UNKNOWN
+
+    def StopSearch(self):
+        self._stopped.set()
+
+    def StatusName(self, status):
+        return cp_model.CpSolver().StatusName(status)
+
+    def WallTime(self):
+        return self._wall
+
+
+@unittest.skipUnless(_HAS_ORTOOLS, "cpsat placement unit tests need ortools")
+class StallStopTest(TestCase):
+    """``cpsat_stall_seconds``: a solve stops once its best plan has not
+    improved for that long, and keeps the plan."""
+
+    def _solve(self, solver):
+        owner = CpSatLayoutSolver(SolveStatsTest._bufs(), 1 << 20)
+        status = owner._solve_and_record(solver, cp_model.CpModel(), objective=True)
+        return status, owner.last_solve_stats
+
+    def test_a_plateau_stops_after_the_stall(self):
+        solver = _PlateauSolver(plans=3)
+        with config.patch({"cpsat_stall_seconds": 0.2}):
+            status, stats = self._solve(solver)
+        self.assertEqual(status, cp_model.FEASIBLE)
+        self.assertTrue(stats["stall_stopped"])
+        self.assertLess(stats["solve_s"], 5.0, "stopped by the stall, not the limit")
+
+    def test_no_plan_runs_to_the_time_limit(self):
+        """The stop keeps a plan, so it waits for one."""
+        solver = _PlateauSolver(plans=0, limit_s=0.6)
+        with config.patch({"cpsat_stall_seconds": 0.1}):
+            status, stats = self._solve(solver)
+        self.assertEqual(status, cp_model.UNKNOWN)
+        self.assertFalse(stats["stall_stopped"])
+        self.assertGreaterEqual(stats["solve_s"], 0.6)
+
+    def test_off_by_default(self):
+        solver = _PlateauSolver(plans=1, limit_s=0.1)
+        self.assertEqual(config.cpsat_stall_seconds, 0)
+        _, stats = self._solve(solver)
+        self.assertIsNone(solver.callback)
+        self.assertNotIn("stall_stopped", stats)
+
+    def test_a_solve_that_finishes_first_is_unchanged(self):
+        """A real CP-SAT solve that proves its plan before the stall."""
+        solver = CpSatLayoutSolver(SolveStatsTest._bufs(), 1 << 20)
+        with config.patch({"cpsat_stall_seconds": 30.0}):
+            solver.plan_layout_and_core_divisions(
+                4000 * (1 - solver.buffers[0].sym_is_lx)
+            )
+        stats = solver.last_solve_stats
+        self.assertEqual(stats["status"], "OPTIMAL")
+        self.assertFalse(stats["stall_stopped"])
 
 
 @unittest.skipUnless(_HAS_ORTOOLS, "cpsat placement unit tests need ortools")
